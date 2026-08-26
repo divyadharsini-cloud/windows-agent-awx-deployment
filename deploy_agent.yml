@@ -1,6 +1,6 @@
 ---
 - name: Deploy and start Windows Custom Agent
-  hosts: DPDYPHGFPER0617
+  hosts: DPDYPHGFPER0617, DPDYPH1FGLA0619, DPDYPHGFDAY0536, DPDYPHGFHKD0115
   gather_facts: false
 
   vars:
