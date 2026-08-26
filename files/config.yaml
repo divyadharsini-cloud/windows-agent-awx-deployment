@@ -1,0 +1,57 @@
+# ============================================
+# Windows Agent Configuration
+# Edit this file to turn modules on/off.
+# No code changes needed for basic tuning.
+# ============================================
+
+agent:
+  name: "windows-agent"
+  log_file: "C:\\ProgramData\\windows-agent\\logs\\agent.log"
+  marker_file: "C:\\ProgramData\\windows-agent\\.installed"   # used to detect first-ever run
+
+# How often continuous modules report / collect
+intervals:
+  heartbeat_seconds: 60
+  asset_collect_seconds: 3600      # 1 hour
+  patch_check_seconds: 21600       # 6 hours
+
+# Prometheus exporter
+metrics:
+  enabled: true
+  port: 9888
+  path: "/metrics"
+
+# Modules on/off switches
+modules:
+  heartbeat: true
+  asset_collector: true
+  patch_tracker: true
+  boot_tasks: true        # IP report to AWX + cache cleanup, runs every boot
+  onetime_setup: true      # Firefox policies, runs ONCE ever
+
+# AWX reporting (used by boot_tasks module)
+awx:
+  server: "https://awx.aravind.org"
+  user: "divya"
+  # NOTE: do not keep real passwords in plaintext in production.
+  # Use an environment variable or a Windows Credential Manager entry instead.
+  password_env_var: "AWX_PASSWORD"
+
+# Firefox settings (used by boot_tasks + onetime_setup)
+firefox:
+  cache_cleanup_enabled: true
+  policies_path: "C:\\Program Files\\Mozilla Firefox\\distribution\\policies.json"
+  homepage_url: "https://eyenotes.aravind.org/eyenotes"
+
+# Custom patch-management engine. Disabled until Master API is ready.
+patch:
+  enabled: true
+  interval_seconds: 21600
+  master_url: "http://172.17.9.50:8443"
+  token_env: "PATCH_AGENT_TOKEN"
+  data_dir: "C:\\ProgramData\\windows-agent\\patch"
+  download_dir: "C:\\ProgramData\\windows-agent\\patch\\downloads"
+  history_file: "C:\\ProgramData\\windows-agent\\patch\\history.json"
+  http_timeout_seconds: 60
+  auto_install: false
+  auto_reboot: false
