@@ -1,0 +1,103 @@
+---
+- name: Deploy and start Windows Custom Agent
+  hosts: windows
+  gather_facts: false
+
+  vars:
+    agent_install_dir: 'C:\Program Files\CustomAgent\windows-agent-new\windows-agent'
+    agent_exe: 'C:\Program Files\CustomAgent\windows-agent-new\windows-agent\custom-agent.exe'
+
+    agent_data_dir: 'C:\ProgramData\windows-agent'
+    agent_log_dir: 'C:\ProgramData\windows-agent\logs'
+    agent_config: 'C:\ProgramData\windows-agent\config.yaml'
+
+    agent_patch_dir: 'C:\ProgramData\windows-agent\patch'
+    agent_patch_download_dir: 'C:\ProgramData\windows-agent\patch\downloads'
+
+    agent_service_name: 'windows-agent'
+    agent_display_name: 'Windows Custom Agent'
+
+  tasks:
+
+    - name: Create agent installation directory
+      ansible.windows.win_file:
+        path: "{{ agent_install_dir }}"
+        state: directory
+
+    - name: Copy Windows Agent executable
+      ansible.windows.win_copy:
+        src: custom-agent.exe
+        dest: "{{ agent_exe }}"
+        force: true
+
+    - name: Create agent ProgramData directory
+      ansible.windows.win_file:
+        path: "{{ agent_data_dir }}"
+        state: directory
+
+    - name: Create agent log directory
+      ansible.windows.win_file:
+        path: "{{ agent_log_dir }}"
+        state: directory
+
+    - name: Create patch directory
+      ansible.windows.win_file:
+        path: "{{ agent_patch_dir }}"
+        state: directory
+
+    - name: Create patch download directory
+      ansible.windows.win_file:
+        path: "{{ agent_patch_download_dir }}"
+        state: directory
+
+    - name: Copy agent configuration
+      ansible.windows.win_copy:
+        src: config.yaml
+        dest: "{{ agent_config }}"
+        force: true
+
+    - name: Install and start Windows Agent service
+      ansible.windows.win_service:
+        name: "{{ agent_service_name }}"
+        display_name: "{{ agent_display_name }}"
+        description: "Windows Custom Agent"
+        path: '"{{ agent_exe }}"'
+        start_mode: auto
+        state: started
+        username: LocalSystem
+
+    - name: Verify Windows Agent service
+      ansible.windows.win_service:
+        name: "{{ agent_service_name }}"
+      register: agent_service
+
+    - name: Verify Windows Agent executable
+      ansible.windows.win_stat:
+        path: "{{ agent_exe }}"
+      register: agent_exe_check
+
+    - name: Verify agent configuration
+      ansible.windows.win_stat:
+        path: "{{ agent_config }}"
+      register: agent_config_check
+
+    - name: Verify agent process
+      ansible.windows.win_shell: |
+        Get-Process -Name "custom-agent" -ErrorAction SilentlyContinue |
+        Select-Object Id, ProcessName, Path
+      register: agent_process
+      changed_when: false
+
+    - name: Display deployment result
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Windows Agent Deployment Result"
+          - "=========================================="
+          - "Executable exists : {{ agent_exe_check.stat.exists }}"
+          - "Config exists     : {{ agent_config_check.stat.exists }}"
+          - "Service name      : {{ agent_service.name }}"
+          - "Service state     : {{ agent_service.state }}"
+          - "Start mode        : {{ agent_service.start_mode }}"
+          - "Agent process     : {{ agent_process.stdout_lines }}"
+          - "=========================================="
