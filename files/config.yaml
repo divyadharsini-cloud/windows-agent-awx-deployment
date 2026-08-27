@@ -41,7 +41,7 @@ awx:
 firefox:
   cache_cleanup_enabled: true
   policies_path: "C:\\Program Files\\Mozilla Firefox\\distribution\\policies.json"
-  homepage_url: "https://eyenotes.aravind.org/eyenotes"
+  homepage_url: "https://vcemr.aravind.org/vcemr"
 
 # Custom patch-management engine. Disabled until Master API is ready.
 patch:
