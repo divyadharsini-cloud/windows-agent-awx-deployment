@@ -6,14 +6,19 @@
 
   vars:
     launcher_directory: "/opt/security-awareness"
-
     launcher_path: "/opt/security-awareness/kiosk-launcher-linux.sh"
 
     autostart_directory: "/etc/xdg/autostart"
-
     autostart_file: "/etc/xdg/autostart/security-awareness-kiosk.desktop"
 
+    backend_base: "http://172.17.6.142:5000/api/awareness"
+    awareness_url: "http://172.17.6.142:5000/awareness.html"
+
   tasks:
+
+    # ---------------------------------------------------------
+    # 1. Create application directory
+    # ---------------------------------------------------------
 
     - name: Create Security Awareness directory
       ansible.builtin.file:
@@ -23,13 +28,127 @@
         group: root
         mode: "0755"
 
-    - name: Copy Firefox kiosk launcher
+
+    # ---------------------------------------------------------
+    # 2. Create Linux launcher script
+    # ---------------------------------------------------------
+
+    - name: Create Firefox kiosk launcher script
       ansible.builtin.copy:
-        src: kiosk-launcher-linux.sh
         dest: "{{ launcher_path }}"
         owner: root
         group: root
         mode: "0755"
+        content: |
+          #!/bin/bash
+
+          BACKEND_BASE="{{ backend_base }}"
+          AWARENESS_URL="{{ awareness_url }}"
+
+          POLL_SECONDS=3
+
+          KIOSK_DIRECTORY="$HOME/.security-awareness"
+          FIREFOX_PROFILE="$KIOSK_DIRECTORY/firefox-kiosk-profile"
+
+          mkdir -p "$KIOSK_DIRECTORY"
+
+          HOSTNAME_VALUE="$(hostname)"
+
+          # ---------------------------------------------------
+          # Check whether this machine already completed test
+          # ---------------------------------------------------
+
+          STATUS=$(curl -sS \
+              --connect-timeout 5 \
+              --max-time 5 \
+              "$BACKEND_BASE/status?hostname=$HOSTNAME_VALUE" \
+              2>/dev/null)
+
+          if [ $? -ne 0 ]; then
+              exit 0
+          fi
+
+          # If already completed, do nothing
+          if echo "$STATUS" | grep -q '"completed"[[:space:]]*:[[:space:]]*true'; then
+              exit 0
+          fi
+
+
+          # ---------------------------------------------------
+          # Find Firefox
+          # ---------------------------------------------------
+
+          FIREFOX="$(command -v firefox 2>/dev/null || true)"
+
+          if [ -z "$FIREFOX" ]; then
+              exit 1
+          fi
+
+
+          # ---------------------------------------------------
+          # Create dedicated Firefox profile
+          # ---------------------------------------------------
+
+          mkdir -p "$FIREFOX_PROFILE"
+
+
+          # ---------------------------------------------------
+          # Launch Firefox in kiosk mode
+          # ---------------------------------------------------
+
+          "$FIREFOX" \
+              --no-remote \
+              --profile "$FIREFOX_PROFILE" \
+              --kiosk \
+              "$AWARENESS_URL" &
+
+          FIREFOX_PID=$!
+
+
+          # ---------------------------------------------------
+          # Monitor completion
+          # ---------------------------------------------------
+
+          while kill -0 "$FIREFOX_PID" 2>/dev/null
+          do
+
+              sleep "$POLL_SECONDS"
+
+              STATUS=$(curl -sS \
+                  --connect-timeout 5 \
+                  --max-time 5 \
+                  "$BACKEND_BASE/status?hostname=$HOSTNAME_VALUE" \
+                  2>/dev/null)
+
+              if [ $? -ne 0 ]; then
+                  continue
+              fi
+
+
+              # ------------------------------------------------
+              # Test completed
+              # ------------------------------------------------
+
+              if echo "$STATUS" | grep -q '"completed"[[:space:]]*:[[:space:]]*true'; then
+
+                  # Close only the Firefox instance started
+                  # by this launcher
+                  kill "$FIREFOX_PID" 2>/dev/null || true
+
+                  sleep 2
+
+                  # Remove dedicated kiosk profile
+                  rm -rf "$FIREFOX_PROFILE"
+
+                  break
+              fi
+
+          done
+
+
+    # ---------------------------------------------------------
+    # 3. Create autostart directory
+    # ---------------------------------------------------------
 
     - name: Ensure autostart directory exists
       ansible.builtin.file:
@@ -38,6 +157,11 @@
         owner: root
         group: root
         mode: "0755"
+
+
+    # ---------------------------------------------------------
+    # 4. Create desktop autostart entry
+    # ---------------------------------------------------------
 
     - name: Create Firefox kiosk autostart entry
       ansible.builtin.copy:
@@ -54,20 +178,37 @@
           Terminal=false
           X-GNOME-Autostart-enabled=true
 
+
+    # ---------------------------------------------------------
+    # 5. Verify launcher
+    # ---------------------------------------------------------
+
     - name: Verify launcher
       ansible.builtin.stat:
         path: "{{ launcher_path }}"
       register: launcher_status
+
+
+    # ---------------------------------------------------------
+    # 6. Verify autostart
+    # ---------------------------------------------------------
 
     - name: Verify autostart
       ansible.builtin.stat:
         path: "{{ autostart_file }}"
       register: autostart_status
 
-    - name: Display Linux deployment result
+
+    # ---------------------------------------------------------
+    # 7. Display result
+    # ---------------------------------------------------------
+
+    - name: Display deployment result
       ansible.builtin.debug:
         msg:
-          - "Linux Firefox Awareness Kiosk deployment completed."
+          - "Security Awareness Linux deployment completed."
           - "Launcher exists: {{ launcher_status.stat.exists }}"
           - "Autostart exists: {{ autostart_status.stat.exists }}"
-          - "Firefox URL: http://172.17.6.142:5000/awareness.html"
+          - "Launcher: {{ launcher_path }}"
+          - "Autostart: {{ autostart_file }}"
+          - "Firefox URL: {{ awareness_url }}"
