@@ -16,10 +16,6 @@
 
   tasks:
 
-    # ---------------------------------------------------------
-    # 1. Create application directory
-    # ---------------------------------------------------------
-
     - name: Create Security Awareness directory
       ansible.builtin.file:
         path: "{{ launcher_directory }}"
@@ -27,11 +23,6 @@
         owner: root
         group: root
         mode: "0755"
-
-
-    # ---------------------------------------------------------
-    # 2. Create Linux launcher script
-    # ---------------------------------------------------------
 
     - name: Create Firefox kiosk launcher script
       ansible.builtin.copy:
@@ -54,11 +45,11 @@
 
           HOSTNAME_VALUE="$(hostname)"
 
-          # Pass hostname to the page so it isn't UNKNOWN-HOST
+          # Pass hostname to awareness page
           AWARENESS_URL="${AWARENESS_BASE_URL}?host=${HOSTNAME_VALUE}"
 
           # ---------------------------------------------------
-          # Check whether this machine already completed test
+          # Check completion before launching Firefox
           # ---------------------------------------------------
 
           STATUS=$(curl -sS \
@@ -71,11 +62,9 @@
               exit 0
           fi
 
-          # If already completed, do nothing
           if echo "$STATUS" | grep -q '"completed"[[:space:]]*:[[:space:]]*true'; then
               exit 0
           fi
-
 
           # ---------------------------------------------------
           # Find Firefox
@@ -87,16 +76,14 @@
               exit 1
           fi
 
-
           # ---------------------------------------------------
           # Create dedicated Firefox profile
           # ---------------------------------------------------
 
           mkdir -p "$FIREFOX_PROFILE"
 
-
           # ---------------------------------------------------
-          # Launch Firefox in kiosk mode
+          # Launch Firefox kiosk
           # ---------------------------------------------------
 
           "$FIREFOX" \
@@ -105,22 +92,13 @@
               --kiosk \
               "$AWARENESS_URL" &
 
-          disown
-
-
-          # ---------------------------------------------------
-          # Monitor completion
-          #
-          # Match by profile path instead of trusting the
-          # launched PID directly — Firefox may fork/exec into
-          # a different real PID, which would make a plain
-          # `kill -0 $PID` check unreliable.
-          # ---------------------------------------------------
-
-          # Give Firefox a moment to actually start before checking
           sleep 2
 
-          while pgrep -f "$FIREFOX_PROFILE" > /dev/null 2>&1
+          # ---------------------------------------------------
+          # Monitor Firefox + completion status
+          # ---------------------------------------------------
+
+          while pgrep -f -- "$FIREFOX_PROFILE" > /dev/null 2>&1
           do
 
               sleep "$POLL_SECONDS"
@@ -135,31 +113,29 @@
                   continue
               fi
 
-
               # ------------------------------------------------
               # Test completed
               # ------------------------------------------------
 
               if echo "$STATUS" | grep -q '"completed"[[:space:]]*:[[:space:]]*true'; then
 
-                  # Close only the Firefox instance(s) running
-                  # under this specific kiosk profile
-                  pkill -f "$FIREFOX_PROFILE" 2>/dev/null || true
+                  # Get only Firefox processes using this profile
+                  PIDS=$(pgrep -f -- "$FIREFOX_PROFILE" || true)
+
+                  for PID in $PIDS
+                  do
+                      kill "$PID" 2>/dev/null || true
+                  done
 
                   sleep 2
 
-                  # Remove dedicated kiosk profile
+                  # Remove only the dedicated kiosk profile
                   rm -rf "$FIREFOX_PROFILE"
 
                   break
               fi
 
           done
-
-
-    # ---------------------------------------------------------
-    # 3. Create autostart directory
-    # ---------------------------------------------------------
 
     - name: Ensure autostart directory exists
       ansible.builtin.file:
@@ -168,11 +144,6 @@
         owner: root
         group: root
         mode: "0755"
-
-
-    # ---------------------------------------------------------
-    # 4. Create desktop autostart entry
-    # ---------------------------------------------------------
 
     - name: Create Firefox kiosk autostart entry
       ansible.builtin.copy:
@@ -189,30 +160,15 @@
           Terminal=false
           X-GNOME-Autostart-enabled=true
 
-
-    # ---------------------------------------------------------
-    # 5. Verify launcher
-    # ---------------------------------------------------------
-
     - name: Verify launcher
       ansible.builtin.stat:
         path: "{{ launcher_path }}"
       register: launcher_status
 
-
-    # ---------------------------------------------------------
-    # 6. Verify autostart
-    # ---------------------------------------------------------
-
     - name: Verify autostart
       ansible.builtin.stat:
         path: "{{ autostart_file }}"
       register: autostart_status
-
-
-    # ---------------------------------------------------------
-    # 7. Display result
-    # ---------------------------------------------------------
 
     - name: Display deployment result
       ansible.builtin.debug:
