@@ -12,7 +12,7 @@
     autostart_file: "/etc/xdg/autostart/security-awareness-kiosk.desktop"
 
     backend_base: "http://172.17.6.142:5000/api/awareness"
-    awareness_url: "http://172.17.6.142:5000/awareness.html"
+    awareness_base_url: "http://172.17.6.142:5000/awareness.html"
 
   tasks:
 
@@ -43,7 +43,7 @@
           #!/bin/bash
 
           BACKEND_BASE="{{ backend_base }}"
-          AWARENESS_URL="{{ awareness_url }}"
+          AWARENESS_BASE_URL="{{ awareness_base_url }}"
 
           POLL_SECONDS=3
 
@@ -53,6 +53,9 @@
           mkdir -p "$KIOSK_DIRECTORY"
 
           HOSTNAME_VALUE="$(hostname)"
+
+          # Pass hostname to the page so it isn't UNKNOWN-HOST
+          AWARENESS_URL="${AWARENESS_BASE_URL}?host=${HOSTNAME_VALUE}"
 
           # ---------------------------------------------------
           # Check whether this machine already completed test
@@ -102,14 +105,22 @@
               --kiosk \
               "$AWARENESS_URL" &
 
-          FIREFOX_PID=$!
+          disown
 
 
           # ---------------------------------------------------
           # Monitor completion
+          #
+          # Match by profile path instead of trusting the
+          # launched PID directly — Firefox may fork/exec into
+          # a different real PID, which would make a plain
+          # `kill -0 $PID` check unreliable.
           # ---------------------------------------------------
 
-          while kill -0 "$FIREFOX_PID" 2>/dev/null
+          # Give Firefox a moment to actually start before checking
+          sleep 2
+
+          while pgrep -f "$FIREFOX_PROFILE" > /dev/null 2>&1
           do
 
               sleep "$POLL_SECONDS"
@@ -131,9 +142,9 @@
 
               if echo "$STATUS" | grep -q '"completed"[[:space:]]*:[[:space:]]*true'; then
 
-                  # Close only the Firefox instance started
-                  # by this launcher
-                  kill "$FIREFOX_PID" 2>/dev/null || true
+                  # Close only the Firefox instance(s) running
+                  # under this specific kiosk profile
+                  pkill -f "$FIREFOX_PROFILE" 2>/dev/null || true
 
                   sleep 2
 
@@ -211,4 +222,4 @@
           - "Autostart exists: {{ autostart_status.stat.exists }}"
           - "Launcher: {{ launcher_path }}"
           - "Autostart: {{ autostart_file }}"
-          - "Firefox URL: {{ awareness_url }}"
+          - "Firefox URL base: {{ awareness_base_url }}"
