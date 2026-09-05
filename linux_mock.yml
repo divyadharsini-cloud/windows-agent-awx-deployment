@@ -25,7 +25,7 @@
 
     - name: Copy Firefox kiosk launcher
       ansible.builtin.copy:
-        src: files/kiosk-launcher-linux.sh
+        src: kiosk-launcher-linux.sh
         dest: "{{ launcher_path }}"
         owner: root
         group: root
