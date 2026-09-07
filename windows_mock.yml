@@ -1,261 +1,260 @@
 ---
-- name: Deploy Security Awareness Kiosk - Windows
+- name: Deploy Security Awareness Kiosk on Windows
   hosts: LMDULB3FAIT0019
   gather_facts: false
 
   vars:
+    kiosk_directory: 'C:\ProgramData\SecurityAwareness'
+    launcher_path: 'C:\ProgramData\SecurityAwareness\kiosk-launcher-windows.ps1'
+    scheduled_task_name: 'SecurityAwarenessKiosk'
 
-    # =========================================================
-    # Application
-    # =========================================================
+    backend_base: 'http://172.17.6.142:5000/api/awareness'
+    awareness_url: 'http://172.17.6.142:5000/awareness.html'
 
-    kiosk_directory: "C:\\ProgramData\\SecurityAwareness"
-    launcher_path: "C:\\ProgramData\\SecurityAwareness\\kiosk-launcher-windows.ps1"
+    # The actual launcher script, as a plain block of text — no quoting
+    # tricks needed here since it's just normal YAML, not a shell string.
+    kiosk_script_content: |
+      $BackendBase = '{{ backend_base }}'
+      $AwarenessUrl = '{{ awareness_url }}'
 
-    # Old Startup-folder shortcut approach (replaced by Scheduled Task,
-    # which fires earlier — right at logon, not after the full desktop
-    # shell finishes loading).
-    old_startup_dir: "C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\Startup"
-    old_shortcut_name: "SecurityAwareness.lnk"
+      $PollSeconds = 2
+      $ResultWaitSeconds = 8
 
-    scheduled_task_name: "SecurityAwarenessKiosk"
+      $LogFile = 'C:\ProgramData\SecurityAwareness\kiosk-launcher.log'
 
-    # =========================================================
-    # Backend
-    # =========================================================
+      function Write-Log($Message) {
+          $Timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+          Add-Content -Path $LogFile -Value "$Timestamp - $Message"
+      }
 
-    backend_base: "http://172.17.6.142:5000/api/awareness"
-    awareness_base_url: "http://172.17.6.142:5000/awareness.html"
+      Write-Log '=========================================='
+      Write-Log 'Security Awareness Kiosk starting'
+      Write-Log "Computer=$env:COMPUTERNAME"
+      Write-Log "User=$env:USERNAME"
+      Write-Log '=========================================='
+
+      # --- Wait for the desktop shell (explorer.exe) ---
+      Write-Log 'Waiting for explorer.exe...'
+      $Count = 0
+      while (-not (Get-Process explorer -ErrorAction SilentlyContinue) -and $Count -lt 60) {
+          Start-Sleep -Seconds 1
+          $Count++
+      }
+      if (-not (Get-Process explorer -ErrorAction SilentlyContinue)) {
+          Write-Log 'ERROR: explorer.exe not found.'
+          exit 0
+      }
+      Write-Log 'explorer.exe detected.'
+
+      # --- Machine identity ---
+      $Hostname = $env:COMPUTERNAME
+      Write-Log "Hostname=$Hostname"
+
+      $IP = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+          Where-Object { $_.IPAddress -notlike '169.254.*' -and $_.IPAddress -ne '127.0.0.1' } |
+          Select-Object -First 1 -ExpandProperty IPAddress
+      if (-not $IP) { $IP = 'unknown' }
+      Write-Log "IP=$IP"
+
+      $LaunchUrl = "$AwarenessUrl?host=$Hostname&ip=$IP"
+      Write-Log "Launch URL=$LaunchUrl"
+
+      # --- Check completion status before launching ---
+      Write-Log 'Checking backend...'
+      try {
+          $Status = Invoke-RestMethod -Uri "$BackendBase/status?hostname=$Hostname" -Method Get -TimeoutSec 10 -ErrorAction Stop
+          Write-Log "Backend response received. Completed=$($Status.completed)"
+      } catch {
+          Write-Log "ERROR: Backend unavailable. $($_.Exception.Message)"
+          Write-Log 'Kiosk will not launch.'
+          exit 0
+      }
+
+      if ($Status.completed -eq $true) {
+          Write-Log 'Awareness test already completed. Kiosk will not launch.'
+          exit 0
+      }
+
+      # --- Find Chrome ---
+      $ChromePaths = @(
+          'C:\Program Files\Google\Chrome\Application\chrome.exe',
+          'C:\Program Files (x86)\Google\Chrome\Application\chrome.exe',
+          "$env:LOCALAPPDATA\Google\Chrome\Application\chrome.exe"
+      )
+      $Chrome = $ChromePaths | Where-Object { Test-Path $_ } | Select-Object -First 1
+
+      if (-not $Chrome) {
+          Write-Log 'ERROR: Chrome not found.'
+          exit 0
+      }
+      Write-Log "Chrome found: $Chrome"
+
+      # --- Launch Chrome ---
+      Write-Log 'Launching Security Awareness kiosk...'
+      try {
+          $ChromeProcess = Start-Process -FilePath $Chrome -ArgumentList @(
+              '--kiosk', '--incognito', '--noerrdialogs', '--disable-pinch',
+              '--disable-session-crashed-bubble', $LaunchUrl
+          ) -PassThru
+          Write-Log "Chrome started. PID=$($ChromeProcess.Id)"
+      } catch {
+          Write-Log "ERROR: Chrome failed to start. $($_.Exception.Message)"
+          exit 0
+      }
+
+      # --- Monitor completion ---
+      while ($true) {
+          Start-Sleep -Seconds $PollSeconds
+
+          try {
+              $Status = Invoke-RestMethod -Uri "$BackendBase/status?hostname=$Hostname" -Method Get -TimeoutSec 10 -ErrorAction Stop
+          } catch {
+              Write-Log 'Backend check failed temporarily.'
+              continue
+          }
+
+          if ($Status.completed -eq $true) {
+              Write-Log "Awareness test completed. Waiting $ResultWaitSeconds seconds."
+              Start-Sleep -Seconds $ResultWaitSeconds
+
+              if (-not $ChromeProcess.HasExited) {
+                  Write-Log 'Closing Chrome.'
+                  Stop-Process -Id $ChromeProcess.Id -Force -ErrorAction SilentlyContinue
+              }
+
+              Write-Log 'Kiosk finished.'
+              exit 0
+          }
+
+          if ($ChromeProcess.HasExited) {
+              Write-Log 'Chrome was closed before completion. Launching again.'
+              try {
+                  $ChromeProcess = Start-Process -FilePath $Chrome -ArgumentList @(
+                      '--kiosk', '--incognito', '--noerrdialogs', '--disable-pinch',
+                      '--disable-session-crashed-bubble', $LaunchUrl
+                  ) -PassThru
+                  Write-Log "Chrome relaunched. PID=$($ChromeProcess.Id)"
+              } catch {
+                  Write-Log 'ERROR: Chrome could not be relaunched.'
+                  Start-Sleep -Seconds 5
+              }
+          }
+      }
 
   tasks:
 
-    # =========================================================
-    # 1. Create application directory
-    # =========================================================
+    # ------------------------------------------------------------
+    # 1. Create Security Awareness directory
+    # ------------------------------------------------------------
 
     - name: Create Security Awareness directory
-      ansible.windows.win_file:
-        path: "{{ kiosk_directory }}"
-        state: directory
+      ansible.builtin.raw: >-
+        powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass
+        -Command "New-Item -ItemType Directory -Path '{{ kiosk_directory }}' -Force | Out-Null"
 
-    # =========================================================
-    # 2. Create the kiosk launcher script
-    # =========================================================
+    # ------------------------------------------------------------
+    # 2. Write the launcher script (base64-encoded to avoid all
+    #    quoting/escaping problems with the embedded PowerShell)
+    # ------------------------------------------------------------
 
-    - name: Create Security Awareness kiosk launcher script
-      ansible.windows.win_copy:
-        dest: "{{ launcher_path }}"
-        content: |
-          # =========================================================
-          # Security Awareness Kiosk Launcher — Windows
-          # Triggered by a Scheduled Task at logon (any user).
-          # =========================================================
+    - name: Create Security Awareness launcher
+      ansible.builtin.raw: >-
+        powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass
+        -Command "[IO.File]::WriteAllText('{{ launcher_path }}',
+        [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{{ kiosk_script_content | b64encode }}')))"
 
-          $BackendBase  = "{{ backend_base }}"
-          $AwarenessUrl = "{{ awareness_base_url }}"
-          $PollSeconds  = 2
-          $ResultWaitSeconds = 8
-          $LogFile = "C:\ProgramData\SecurityAwareness\kiosk-launcher.log"
+    # ------------------------------------------------------------
+    # 3. Remove any old scheduled task before recreating it
+    # ------------------------------------------------------------
 
-          function Write-Log($msg) {
-              $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-              Add-Content -Path $LogFile -Value "$timestamp - $msg"
-          }
+    - name: Remove old Security Awareness scheduled task
+      ansible.builtin.raw: >-
+        schtasks.exe /Delete /TN "{{ scheduled_task_name }}" /F
+      failed_when: false
 
-          Write-Log "=========================================="
-          Write-Log "Security Awareness Kiosk starting"
-          Write-Log "User=$env:USERNAME  Computer=$env:COMPUTERNAME"
-          Write-Log "=========================================="
+    # ------------------------------------------------------------
+    # 4. Create the scheduled task
+    #
+    # Primary attempt: fire once at BOOT, run inside the first
+    # interactive user's session (/RU + /IT). This matches
+    # "not on every login" — it only waits for the FIRST logon
+    # after a boot, not each subsequent one.
+    #
+    # NOTE: /IT + a group account can behave inconsistently across
+    # Windows versions. If verification (task 6) shows the task
+    # was not created successfully, comment this task out and
+    # uncomment the ONLOGON fallback below instead — the script's
+    # own completion check still prevents it from reopening once
+    # done, so ONLOGON remains a safe fallback even though it
+    # technically fires at every login.
+    # ------------------------------------------------------------
 
-          # --- Wait for the desktop shell (explorer.exe) to be ready ---
-          # This task fires at BOOT, before any user session may fully
-          # exist yet. Wait briefly for explorer.exe so we don't try to
-          # draw a window before there's a desktop to draw it on.
-          $waitCount = 0
-          while (-not (Get-Process -Name explorer -ErrorAction SilentlyContinue) -and $waitCount -lt 30) {
-              Start-Sleep -Seconds 1
-              $waitCount++
-          }
+    - name: Create Security Awareness boot task (fires once, first interactive user)
+      ansible.builtin.raw: >-
+        schtasks.exe /Create /TN "{{ scheduled_task_name }}" /SC ONSTART
+        /RU "BUILTIN\Users" /IT
+        /TR "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"{{ launcher_path }}\""
+        /F
 
-          if (-not (Get-Process -Name explorer -ErrorAction SilentlyContinue)) {
-              Write-Log "ERROR: explorer.exe never became available. Exiting."
-              exit 0
-          }
+    # --- Fallback (fires at every logon, but harmless due to the
+    #     completion check inside the script) — uncomment if the
+    #     task above fails to register or fails to fire in testing:
+    #
+    # - name: Create Security Awareness logon task (fallback)
+    #   ansible.builtin.raw: >-
+    #     schtasks.exe /Create /TN "{{ scheduled_task_name }}" /SC ONLOGON
+    #     /TR "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"{{ launcher_path }}\""
+    #     /F
 
-          Write-Log "Desktop shell ready (waited $waitCount seconds)."
+    # ------------------------------------------------------------
+    # 5. Verify launcher exists
+    # ------------------------------------------------------------
 
-          # --- Gather machine identity ---
-          $hostname = $env:COMPUTERNAME
-          $ip = (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
-                  Where-Object { $_.IPAddress -notlike "169.254.*" -and $_.IPAddress -ne "127.0.0.1" } |
-                  Select-Object -First 1 -ExpandProperty IPAddress)
-          if (-not $ip) { $ip = "unknown" }
+    - name: Verify launcher exists
+      ansible.builtin.raw: >-
+        powershell.exe -NoProfile -NonInteractive -Command
+        "if (Test-Path '{{ launcher_path }}') { Write-Output 'LAUNCHER_EXISTS=True' } else { Write-Output 'LAUNCHER_EXISTS=False'; exit 1 }"
+      register: launcher_check
 
-          Write-Log "Hostname=$hostname  IP=$ip"
+    # ------------------------------------------------------------
+    # 6. Verify scheduled task
+    # ------------------------------------------------------------
 
-          $launchUrl = "$AwarenessUrl?host=$hostname&ip=$ip"
-          Write-Log "Awareness URL=$launchUrl"
+    - name: Verify scheduled task
+      ansible.builtin.raw: >-
+        schtasks.exe /Query /TN "{{ scheduled_task_name }}"
+      register: task_check
+      failed_when: false
 
-          # --- Check completion status BEFORE launching ---
-          try {
-              $status = Invoke-RestMethod -Uri "$BackendBase/status?hostname=$hostname" -Method Get -TimeoutSec 5
-              Write-Log "API response: completed=$($status.completed)"
-          } catch {
-              Write-Log "Backend unavailable: $($_.Exception.Message)"
-              Write-Log "Fail-open: kiosk will NOT be launched."
-              exit 0
-          }
+    # ------------------------------------------------------------
+    # 7. Verify Chrome is installed
+    # ------------------------------------------------------------
 
-          if ($status.completed -eq $true) {
-              Write-Log "Mock test already completed. Kiosk will NOT be opened."
-              exit 0
-          }
+    - name: Verify Chrome
+      ansible.builtin.raw: >-
+        powershell.exe -NoProfile -NonInteractive -Command
+        "$ChromePaths = @('C:\Program Files\Google\Chrome\Application\chrome.exe', 'C:\Program Files (x86)\Google\Chrome\Application\chrome.exe', \"$env:LOCALAPPDATA\Google\Chrome\Application\chrome.exe\");
+        $Chrome = $ChromePaths | Where-Object { Test-Path $_ } | Select-Object -First 1;
+        if ($Chrome) { Write-Output \"CHROME_EXISTS=True\"; Write-Output \"CHROME_PATH=$Chrome\" } else { Write-Output 'CHROME_EXISTS=False'; exit 1 }"
+      register: chrome_check
+      failed_when: false
 
-          Write-Log "Mock test is NOT completed. Starting kiosk."
-
-          # --- Find Chrome ---
-          $chromePaths = @(
-              "C:\Program Files\Google\Chrome\Application\chrome.exe",
-              "C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"
-          )
-          $chrome = $chromePaths | Where-Object { Test-Path $_ } | Select-Object -First 1
-
-          if (-not $chrome) {
-              Write-Log "ERROR: Chrome not found."
-              exit 0
-          }
-          Write-Log "Chrome=$chrome"
-
-          # --- Launch kiosk browser ---
-          Write-Log "Launching kiosk..."
-          $proc = Start-Process -FilePath $chrome -ArgumentList @(
-              "--kiosk",
-              "--incognito",
-              "--noerrdialogs",
-              "--disable-pinch",
-              $launchUrl
-          ) -PassThru
-
-          Write-Log "Chrome PID=$($proc.Id)"
-          Start-Sleep -Seconds 2
-
-          if ($proc.HasExited) {
-              Write-Log "ERROR: Chrome exited immediately."
-              exit 1
-          }
-          Write-Log "Kiosk is running."
-
-          # --- Monitor completion ---
-          $completed = $false
-          while (-not $completed) {
-              Start-Sleep -Seconds $PollSeconds
-
-              try {
-                  $status = Invoke-RestMethod -Uri "$BackendBase/status?hostname=$hostname" -Method Get -TimeoutSec 5
-              } catch {
-                  Write-Log "Temporary API failure: $($_.Exception.Message)"
-                  continue
-              }
-
-              Write-Log "Status: completed=$($status.completed)"
-
-              if ($status.completed -eq $true) {
-                  Write-Log "=========================================="
-                  Write-Log "MOCK TEST COMPLETED"
-                  Write-Log "Showing result for $ResultWaitSeconds seconds"
-                  Write-Log "=========================================="
-                  Start-Sleep -Seconds $ResultWaitSeconds
-
-                  if (-not $proc.HasExited) {
-                      Write-Log "Closing kiosk."
-                      Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
-                  }
-
-                  $completed = $true
-                  Write-Log "Security Awareness Kiosk completed."
-                  break
-              }
-
-              # if user closed the browser early and it's not done yet, relaunch it
-              if ($proc.HasExited) {
-                  Write-Log "Chrome closed early — relaunching."
-                  $proc = Start-Process -FilePath $chrome -ArgumentList @(
-                      "--kiosk", "--incognito", "--noerrdialogs", "--disable-pinch", $launchUrl
-                  ) -PassThru
-              }
-          }
-
-          Write-Log "Security Awareness launcher exiting."
-          exit 0
-
-    # =========================================================
-    # 3. Remove old Startup-folder shortcut, if present
-    #    (replaced by the Scheduled Task below, which fires
-    #    earlier and works for any user, not just one account)
-    # =========================================================
-
-    - name: Remove old Startup shortcut if present
-      ansible.windows.win_file:
-        path: "{{ old_startup_dir }}\\{{ old_shortcut_name }}"
-        state: absent
-
-    # =========================================================
-    # 4. Create the Scheduled Task — fires at logon, for ANY user
-    # =========================================================
-
-    - name: Create Scheduled Task to run kiosk launcher once at boot
-      ansible.windows.win_scheduled_task:
-        name: "{{ scheduled_task_name }}"
-        description: "Security Awareness Kiosk — runs once at boot, in whichever user's session logs on first"
-        actions:
-          - path: "powershell.exe"
-            arguments: '-ExecutionPolicy Bypass -WindowStyle Hidden -File "{{ launcher_path }}"'
-        triggers:
-          - type: boot
-        # "BUILTIN\Users" + interactive_token = the Task Scheduler equivalent
-        # of "Run only when user is logged on", set to any member of the
-        # Users group rather than one specific account. Combined with a
-        # boot trigger, this fires exactly once per boot, in the session
-        # of whichever user logs on first — not on every subsequent logon.
-        username: "BUILTIN\\Users"
-        logon_type: interactive_token
-        run_level: limited
-        enabled: true
-        state: present
-
-    # =========================================================
-    # 5. Verify everything deployed correctly
-    # =========================================================
-
-    - name: Verify launcher script exists
-      ansible.windows.win_stat:
-        path: "{{ launcher_path }}"
-      register: launcher_status
-
-    - name: Verify old Startup shortcut is gone
-      ansible.windows.win_stat:
-        path: "{{ old_startup_dir }}\\{{ old_shortcut_name }}"
-      register: old_shortcut_status
-
-    - name: Check Chrome is installed
-      ansible.windows.win_stat:
-        path: "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
-      register: chrome_status
+    # ------------------------------------------------------------
+    # 8. Final result
+    # ------------------------------------------------------------
 
     - name: Display deployment result
       ansible.builtin.debug:
         msg:
-          - "=========================================="
-          - "Security Awareness Windows Deployment"
-          - "=========================================="
-          - "Launcher exists: {{ launcher_status.stat.exists }}"
-          - "Old Startup shortcut removed: {{ not old_shortcut_status.stat.exists }}"
-          - "Chrome installed: {{ chrome_status.stat.exists }}"
-          - "Scheduled task: {{ scheduled_task_name }} (boot trigger, fires once, first interactive user)"
+          - "Security Awareness Kiosk deployment completed."
           - "Launcher: {{ launcher_path }}"
+          - "Launcher check: {{ launcher_check.stdout | default('unknown') }}"
+          - "Scheduled Task: {{ scheduled_task_name }}"
+          - "Task check: {{ task_check.stdout | default('not found') }}"
+          - "Chrome check: {{ chrome_check.stdout | default('not found') }}"
+          - "Trigger: Boot, first interactive user (BUILTIN\\Users + /IT)"
           - "Backend: {{ backend_base }}"
-          - "Awareness URL: {{ awareness_base_url }}"
+          - "Awareness URL: {{ awareness_url }}"
           - "Polling interval: 2 seconds"
-          - "Result display: 8 seconds"
+          - "Result wait: 8 seconds"
           - "Log: C:\\ProgramData\\SecurityAwareness\\kiosk-launcher.log"
-          - "=========================================="
