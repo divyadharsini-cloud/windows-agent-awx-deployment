@@ -1,5 +1,5 @@
 ---
-- name: Fix Security Awareness Windows Kiosk Launcher
+- name: Fix Security Awareness Windows Kiosk URL
   hosts: LMDULB3FAIT0019
   gather_facts: false
 
@@ -13,10 +13,10 @@
   tasks:
 
     # =========================================================
-    # Replace launcher with corrected URLs
+    # 1. Replace launcher
     # =========================================================
 
-    - name: Install corrected Security Awareness launcher
+    - name: Install corrected kiosk launcher
       ansible.windows.win_copy:
         dest: "{{ launcher_path }}"
         content: |
@@ -51,7 +51,7 @@
 
 
           # =====================================================
-          # Wait for interactive desktop
+          # Wait for explorer
           # =====================================================
 
           Write-Log 'Waiting for explorer.exe...'
@@ -86,17 +86,13 @@
 
 
           # =====================================================
-          # Backend status URL
+          # Backend status
           # =====================================================
 
-          $statusUrl = "$BackendBase/status?hostname=$hostname"
+          $statusUrl = "${BackendBase}/status?hostname=${hostname}"
 
           Write-Log "Checking backend: $statusUrl"
 
-
-          # =====================================================
-          # Initial backend check
-          # =====================================================
 
           try {
 
@@ -167,16 +163,16 @@
 
 
           # =====================================================
-          # Correct kiosk URL
+          # Build correct kiosk URL
           # =====================================================
 
-          $KioskUrl = "$AwarenessUrl?host=$hostname"
+          $KioskUrl = "${AwarenessUrl}?host=${hostname}"
 
           Write-Log "Kiosk URL: $KioskUrl"
 
 
           # =====================================================
-          # Dedicated Chrome profile
+          # Chrome profile
           # =====================================================
 
           $ChromeProfile = 'C:\ProgramData\SecurityAwareness\ChromeProfile'
@@ -312,30 +308,25 @@
 
                   Write-Log "Backend check failed: $($_.Exception.Message)"
 
-                  # Keep kiosk open if backend temporarily fails.
+                  # Keep kiosk open.
                   continue
               }
           }
 
-      register: launcher_deploy
 
     # =========================================================
-    # Verify the actual URLs written to the file
+    # 2. Remove old Chrome instance
     # =========================================================
 
-    - name: Verify launcher URLs
+    - name: Close old Chrome processes
       ansible.builtin.raw: |
         powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ^
-        "Write-Host '--- Backend URL ---'; ^
-        Select-String -Path '{{ launcher_path }}' -Pattern 'BackendBase'; ^
-        Write-Host '--- Awareness URL ---'; ^
-        Select-String -Path '{{ launcher_path }}' -Pattern 'AwarenessUrl'; ^
-        Write-Host '--- Launcher exists ---'; ^
-        Write-Host (Test-Path '{{ launcher_path }}')"
-      changed_when: false
+        "Get-Process chrome -ErrorAction SilentlyContinue | Stop-Process -Force"
+      changed_when: true
+
 
     # =========================================================
-    # Clear old log
+    # 3. Remove old log
     # =========================================================
 
     - name: Remove old kiosk log
@@ -344,15 +335,32 @@
         "Remove-Item '{{ log_path }}' -Force -ErrorAction SilentlyContinue"
       changed_when: true
 
+
     # =========================================================
-    # Final message
+    # 4. Verify important URL lines
     # =========================================================
 
-    - name: Show fix result
+    - name: Verify corrected URL configuration
+      ansible.builtin.raw: |
+        powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ^
+        "Write-Host '--- Backend ---'; ^
+        Select-String -Path '{{ launcher_path }}' -Pattern 'BackendBase'; ^
+        Write-Host '--- Awareness Page ---'; ^
+        Select-String -Path '{{ launcher_path }}' -Pattern 'AwarenessUrl'; ^
+        Write-Host '--- Kiosk URL ---'; ^
+        Select-String -Path '{{ launcher_path }}' -Pattern 'KioskUrl'"
+      changed_when: false
+
+
+    # =========================================================
+    # 5. Final message
+    # =========================================================
+
+    - name: Show result
       ansible.builtin.debug:
         msg:
-          - "Security Awareness launcher fixed."
-          - "Backend URL: {{ backend_url }}"
-          - "Awareness page: {{ awareness_page }}"
-          - "Hostname is appended automatically."
+          - "Launcher URL has been fixed."
+          - "Correct URL format:"
+          - "{{ awareness_page }}?host=<COMPUTERNAME>"
+          - "Old malformed '=hostname' URL is fixed."
           - "No reboot required."
