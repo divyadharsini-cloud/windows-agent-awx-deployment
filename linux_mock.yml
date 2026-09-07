@@ -1,5 +1,5 @@
 ---
-- name: Deploy Security Awareness Kiosk - Linux Firefox
+- name: Deploy Security Awareness Kiosk - Boot Startup
   hosts: ansibletesting
   become: true
   gather_facts: false
@@ -7,18 +7,23 @@
   vars:
 
     # =========================================================
-    # Application paths
+    # Kiosk configuration
     # =========================================================
+
+    kiosk_user: "adminit"
 
     launcher_directory: "/opt/security-awareness"
     launcher_path: "/opt/security-awareness/kiosk-launcher-linux.sh"
 
-    # Old XFCE/XDG autostart
-    autostart_file: "/etc/xdg/autostart/security-awareness-kiosk.desktop"
+    # System-level systemd service
+    systemd_service_file: "/etc/systemd/system/security-awareness-kiosk.service"
 
-    # Systemd user service
-    systemd_user_directory: "/etc/systemd/user"
-    systemd_service_file: "/etc/systemd/user/security-awareness-kiosk.service"
+    # Old XDG autostart entry
+    old_autostart_file: "/etc/xdg/autostart/security-awareness-kiosk.desktop"
+
+    # Old systemd user service
+    old_user_service_file: "/etc/systemd/user/security-awareness-kiosk.service"
+
 
     # =========================================================
     # Backend
@@ -31,7 +36,7 @@
   tasks:
 
     # =========================================================
-    # 1. Create Security Awareness directory
+    # 1. Create application directory
     # =========================================================
 
     - name: Create Security Awareness directory
@@ -44,10 +49,10 @@
 
 
     # =========================================================
-    # 2. Create Firefox kiosk launcher script
+    # 2. Create boot-time kiosk launcher
     # =========================================================
 
-    - name: Create Firefox kiosk launcher script
+    - name: Create boot-time Firefox kiosk launcher
       ansible.builtin.copy:
         dest: "{{ launcher_path }}"
         owner: root
@@ -58,34 +63,36 @@
           #!/bin/bash
 
           # =====================================================
-          # Security Awareness Firefox Kiosk Launcher
+          # Security Awareness Kiosk
+          #
+          # This launcher is started by a SYSTEM-level systemd
+          # service during machine startup.
+          #
+          # It does NOT depend on XFCE/XDG autostart.
+          # It does NOT require manually starting the service.
+          # =====================================================
+
+
+          # =====================================================
+          # Configuration
           # =====================================================
 
           BACKEND_BASE="{{ backend_base }}"
           AWARENESS_BASE_URL="{{ awareness_base_url }}"
 
-          # Check backend every 2 seconds
-          POLL_SECONDS=2
+          KIOSK_USER="{{ kiosk_user }}"
 
-          # Keep result/score visible for 8 seconds
+          POLL_SECONDS=2
           COMPLETION_GRACE_SECONDS=8
 
-          # Wait up to 30 seconds for graphical environment
-          GUI_WAIT_SECONDS=30
+          # Maximum time to wait for graphical session
+          GUI_WAIT_SECONDS=120
 
-          # Debug log
           LOG_FILE="/tmp/security-awareness-kiosk.log"
-
-          # Dedicated Firefox profile
-          KIOSK_DIRECTORY="$HOME/.security-awareness"
-          FIREFOX_PROFILE="$KIOSK_DIRECTORY/firefox-kiosk-profile"
-
-          # Standard PATH
-          export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 
           # =====================================================
-          # Logging function
+          # Logging
           # =====================================================
 
           log()
@@ -95,44 +102,149 @@
 
 
           # =====================================================
-          # Startup log
+          # Startup
           # =====================================================
 
           log "=========================================="
-          log "Security Awareness Kiosk starting"
-          log "USER=$USER"
-          log "HOME=$HOME"
-          log "DISPLAY=$DISPLAY"
-          log "WAYLAND_DISPLAY=$WAYLAND_DISPLAY"
-          log "XDG_SESSION_TYPE=$XDG_SESSION_TYPE"
+          log "Security Awareness Kiosk SYSTEM service"
+          log "Starting during machine startup"
+          log "Expected kiosk user=$KIOSK_USER"
           log "=========================================="
 
 
           # =====================================================
-          # Wait for graphical environment
-          #
-          # The systemd user service can start before XFCE
-          # has finished initializing the graphical session.
-          #
-          # Therefore wait up to 30 seconds for DISPLAY or
-          # WAYLAND_DISPLAY to become available.
+          # Check required commands
           # =====================================================
 
-          log "Waiting for graphical session..."
+          if [ ! -x "/usr/bin/curl" ]; then
+              log "ERROR: curl not found."
+              exit 0
+          fi
 
-          GUI_READY="false"
+          if ! id "$KIOSK_USER" >/dev/null 2>&1; then
+              log "ERROR: User $KIOSK_USER does not exist."
+              exit 0
+          fi
 
-          for i in $(seq 1 15)
+
+          # =====================================================
+          # Wait for graphical user session
+          #
+          # This is the important part.
+          #
+          # The system service starts during BOOT.
+          # The graphical user session may not be ready yet.
+          #
+          # Therefore we repeatedly check loginctl until an
+          # active graphical session is available.
+          # =====================================================
+
+          log "Waiting for graphical user session..."
+
+          GUI_USER=""
+          DISPLAY_VALUE=""
+          SESSION_ID=""
+          XDG_SESSION_TYPE_VALUE=""
+
+          WAIT_COUNT=0
+          MAX_WAIT_COUNT=$((GUI_WAIT_SECONDS / 2))
+
+
+          while [ "$WAIT_COUNT" -lt "$MAX_WAIT_COUNT" ]
           do
 
-              if [ -n "$DISPLAY" ] || [ -n "$WAYLAND_DISPLAY" ]; then
+              WAIT_COUNT=$((WAIT_COUNT + 1))
 
-                  GUI_READY="true"
+
+              # -------------------------------------------------
+              # Search active sessions
+              # -------------------------------------------------
+
+              while read -r SESSION USER SEAT TTY
+              do
+
+                  [ -z "$SESSION" ] && continue
+
+                  SESSION_TYPE="$(loginctl show-session "$SESSION" -p Type --value 2>/dev/null)"
+                  SESSION_STATE="$(loginctl show-session "$SESSION" -p State --value 2>/dev/null)"
+                  SESSION_CLASS="$(loginctl show-session "$SESSION" -p Class --value 2>/dev/null)"
+                  SESSION_DISPLAY="$(loginctl show-session "$SESSION" -p Display --value 2>/dev/null)"
+                  SESSION_NAME="$(loginctl show-session "$SESSION" -p Name --value 2>/dev/null)"
+
+
+                  # We specifically want the kiosk user.
+                  if [ "$USER" != "$KIOSK_USER" ]; then
+                      continue
+                  fi
+
+
+                  # Need an active graphical session.
+                  if [ "$SESSION_STATE" != "active" ]; then
+                      continue
+                  fi
+
+
+                  if [ "$SESSION_TYPE" != "x11" ] && [ "$SESSION_TYPE" != "wayland" ]; then
+                      continue
+                  fi
+
+
+                  GUI_USER="$USER"
+                  SESSION_ID="$SESSION"
+                  XDG_SESSION_TYPE_VALUE="$SESSION_TYPE"
+                  DISPLAY_VALUE="$SESSION_DISPLAY"
+
+
+                  # -------------------------------------------------
+                  # X11 display detection
+                  #
+                  # loginctl normally gives the display, but some
+                  # environments may not expose it. In that case
+                  # inspect the user's environment.
+                  # -------------------------------------------------
+
+                  if [ "$SESSION_TYPE" = "x11" ]; then
+
+                      if [ -z "$DISPLAY_VALUE" ]; then
+
+                          USER_DISPLAY="$(
+                              tr '\0' '\n' < "/proc/$(loginctl show-session "$SESSION" -p Leader --value 2>/dev/null)/environ" 2>/dev/null |
+                              sed -n 's/^DISPLAY=//p' |
+                              head -n 1
+                          )"
+
+                          if [ -n "$USER_DISPLAY" ]; then
+                              DISPLAY_VALUE="$USER_DISPLAY"
+                          fi
+
+                      fi
+
+                  fi
+
+
+                  break
+
+              done < <(loginctl list-sessions --no-legend 2>/dev/null)
+
+
+              # -------------------------------------------------
+              # Graphical session found
+              # -------------------------------------------------
+
+              if [ -n "$GUI_USER" ]; then
+
+                  log "Graphical session found."
+                  log "User=$GUI_USER"
+                  log "Session=$SESSION_ID"
+                  log "Type=$XDG_SESSION_TYPE_VALUE"
+                  log "Display=$DISPLAY_VALUE"
+
                   break
 
               fi
 
-              log "Graphical session not ready. Waiting... ($i/15)"
+
+              log "Graphical session not ready. Waiting... ($WAIT_COUNT/$MAX_WAIT_COUNT)"
 
               sleep 2
 
@@ -140,34 +252,78 @@
 
 
           # =====================================================
-          # Graphical session still unavailable
+          # No graphical session
           # =====================================================
 
-          if [ "$GUI_READY" != "true" ]; then
+          if [ -z "$GUI_USER" ]; then
 
-              log "ERROR: No graphical display available after 30 seconds."
-              log "Security Awareness kiosk will not start."
+              log "ERROR: Graphical user session was not available."
+              log "Kiosk will not start."
 
               exit 0
 
           fi
 
 
-          log "Graphical session available."
-          log "DISPLAY=$DISPLAY"
-          log "XDG_SESSION_TYPE=$XDG_SESSION_TYPE"
+          # =====================================================
+          # Determine user home directory
+          # =====================================================
+
+          USER_HOME="$(getent passwd "$GUI_USER" | cut -d: -f6)"
+
+          if [ -z "$USER_HOME" ]; then
+
+              log "ERROR: Could not determine home directory."
+
+              exit 0
+
+          fi
+
+
+          log "User home=$USER_HOME"
 
 
           # =====================================================
-          # Create kiosk directories
+          # Determine XAUTHORITY
           # =====================================================
 
-          mkdir -p "$KIOSK_DIRECTORY"
-          mkdir -p "$FIREFOX_PROFILE"
+          XAUTHORITY_VALUE="$USER_HOME/.Xauthority"
+
+
+          if [ ! -f "$XAUTHORITY_VALUE" ]; then
+
+              # Try to find an Xauthority file owned by the user.
+
+              FOUND_XAUTHORITY="$(
+                  find "$USER_HOME" \
+                      -maxdepth 2 \
+                      -type f \
+                      \( -name ".Xauthority" -o -name "Xauthority" \) \
+                      -user "$GUI_USER" \
+                      2>/dev/null |
+                  head -n 1
+              )"
+
+              if [ -n "$FOUND_XAUTHORITY" ]; then
+                  XAUTHORITY_VALUE="$FOUND_XAUTHORITY"
+              fi
+
+          fi
+
+
+          if [ -f "$XAUTHORITY_VALUE" ]; then
+
+              log "XAUTHORITY=$XAUTHORITY_VALUE"
+
+          else
+
+              log "XAUTHORITY file not found at $XAUTHORITY_VALUE"
+
+          fi
 
 
           # =====================================================
-          # Get hostname
+          # Hostname
           # =====================================================
 
           HOSTNAME_VALUE="$(hostname)"
@@ -176,7 +332,7 @@
 
 
           # =====================================================
-          # Build awareness URL
+          # Awareness URL
           # =====================================================
 
           AWARENESS_URL="${AWARENESS_BASE_URL}?host=${HOSTNAME_VALUE}"
@@ -185,13 +341,15 @@
 
 
           # =====================================================
-          # Check completion BEFORE opening Firefox
+          # Check completion status BEFORE launching Firefox
           # =====================================================
 
           log "Checking completion status..."
 
+
           STATUS=$(
-              /usr/bin/curl -sS \
+              /usr/bin/curl \
+                  -sS \
                   --connect-timeout 2 \
                   --max-time 2 \
                   "$BACKEND_BASE/status?hostname=$HOSTNAME_VALUE" \
@@ -207,6 +365,11 @@
 
           # =====================================================
           # Backend unavailable
+          #
+          # Fail-open.
+          #
+          # Do not lock the user out of the machine if the
+          # backend is unavailable during startup.
           # =====================================================
 
           if [ "$CURL_RESULT" -ne 0 ]; then
@@ -220,12 +383,12 @@
 
 
           # =====================================================
-          # Validate API response
+          # Empty API response
           # =====================================================
 
           if [ -z "$STATUS" ]; then
 
-              log "ERROR: Empty response received from backend."
+              log "ERROR: Empty API response."
               log "Fail-open: Firefox kiosk will NOT be launched."
 
               exit 0
@@ -257,7 +420,7 @@
 
 
           # =====================================================
-          # Find Firefox
+          # Firefox detection
           # =====================================================
 
           FIREFOX=""
@@ -277,21 +440,31 @@
           fi
 
 
-          # =====================================================
-          # Firefox not found
-          # =====================================================
-
           if [ -z "$FIREFOX" ]; then
 
               log "ERROR: Firefox not found."
-              log "Security Awareness kiosk cannot start."
 
-              exit 1
+              exit 0
 
           fi
 
 
           log "Firefox=$FIREFOX"
+
+
+          # =====================================================
+          # Kiosk directories
+          # =====================================================
+
+          KIOSK_DIRECTORY="$USER_HOME/.security-awareness"
+          FIREFOX_PROFILE="$KIOSK_DIRECTORY/firefox-kiosk-profile"
+
+
+          mkdir -p "$KIOSK_DIRECTORY"
+          mkdir -p "$FIREFOX_PROFILE"
+
+
+          chown -R "$GUI_USER:$GUI_USER" "$KIOSK_DIRECTORY"
 
 
           # =====================================================
@@ -303,68 +476,103 @@
 
 
           # =====================================================
-          # Launch Firefox kiosk
+          # Build Firefox environment
           # =====================================================
 
-          log "Launching Firefox kiosk..."
+          export DISPLAY="$DISPLAY_VALUE"
 
-          "$FIREFOX" \
-              --no-remote \
-              --profile "$FIREFOX_PROFILE" \
-              --kiosk \
-              "$AWARENESS_URL" \
-              >> "$LOG_FILE" 2>&1 &
+          export XDG_SESSION_TYPE="$XDG_SESSION_TYPE_VALUE"
+
+          export XAUTHORITY="$XAUTHORITY_VALUE"
+
+          export XDG_RUNTIME_DIR="/run/user/$(id -u "$GUI_USER")"
+
+
+          # =====================================================
+          # Launch Firefox as the graphical user
+          #
+          # IMPORTANT:
+          # Firefox is NOT launched as root.
+          # It is launched as adminit.
+          # =====================================================
+
+          log "Launching Firefox as user=$GUI_USER"
+          log "DISPLAY=$DISPLAY"
+          log "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR"
+          log "XAUTHORITY=$XAUTHORITY"
+
+
+          runuser -u "$GUI_USER" -- env \
+              DISPLAY="$DISPLAY" \
+              XAUTHORITY="$XAUTHORITY" \
+              XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
+              XDG_SESSION_TYPE="$XDG_SESSION_TYPE" \
+              HOME="$USER_HOME" \
+              USER="$GUI_USER" \
+              LOGNAME="$GUI_USER" \
+              PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+              "$FIREFOX" \
+                  --no-remote \
+                  --profile "$FIREFOX_PROFILE" \
+                  --kiosk \
+                  "$AWARENESS_URL" \
+                  >> "$LOG_FILE" 2>&1 &
+
 
           FIREFOX_PID=$!
 
 
-          log "Firefox PID=$FIREFOX_PID"
+          log "Firefox launcher PID=$FIREFOX_PID"
 
 
           # =====================================================
           # Allow Firefox to initialize
           # =====================================================
 
-          sleep 2
+          sleep 3
 
 
           # =====================================================
-          # Verify Firefox process
+          # Verify launcher process
           # =====================================================
 
           if ! kill -0 "$FIREFOX_PID" 2>/dev/null
           then
 
-              log "ERROR: Firefox exited immediately."
+              log "ERROR: Firefox launcher exited immediately."
 
               exit 1
 
           fi
 
 
-          log "Firefox kiosk is running."
+          log "Firefox kiosk launch command is running."
 
 
           # =====================================================
           # Monitor completion
+          #
+          # Continue polling while the Firefox launcher process
+          # exists.
           # =====================================================
 
           while kill -0 "$FIREFOX_PID" 2>/dev/null
           do
 
-              # =================================================
-              # Poll every 2 seconds
-              # =================================================
+              # -------------------------------------------------
+              # Wait 2 seconds
+              # -------------------------------------------------
 
               sleep "$POLL_SECONDS"
 
 
-              # =================================================
-              # Query backend
-              # =================================================
+              # -------------------------------------------------
+              # Check API
+              # -------------------------------------------------
 
               STATUS=$(
-                  /usr/bin/curl -sS \
+                  /usr/bin/curl \
+                      -sS \
                       --connect-timeout 2 \
                       --max-time 2 \
                       "$BACKEND_BASE/status?hostname=$HOSTNAME_VALUE" \
@@ -374,9 +582,9 @@
               CURL_RESULT=$?
 
 
-              # =================================================
-              # Temporary backend/network failure
-              # =================================================
+              # -------------------------------------------------
+              # Temporary API failure
+              # -------------------------------------------------
 
               if [ "$CURL_RESULT" -ne 0 ]; then
 
@@ -386,10 +594,6 @@
 
               fi
 
-
-              # =================================================
-              # Empty response
-              # =================================================
 
               if [ -z "$STATUS" ]; then
 
@@ -412,22 +616,28 @@
 
                   log "=========================================="
                   log "MOCK TEST COMPLETED"
-                  log "Keeping result screen visible for 8 seconds."
+                  log "Keeping result/score visible for 8 seconds."
                   log "=========================================="
 
 
-                  # =================================================
-                  # Keep result/score visible
-                  # =================================================
+                  # ------------------------------------------------
+                  # Keep result visible
+                  # ------------------------------------------------
 
                   sleep "$COMPLETION_GRACE_SECONDS"
 
 
-                  # =================================================
-                  # Close ONLY kiosk Firefox
-                  # =================================================
+                  # ------------------------------------------------
+                  # Close Firefox
+                  # ------------------------------------------------
 
-                  log "Closing kiosk Firefox PID=$FIREFOX_PID"
+                  log "Closing kiosk Firefox."
+
+
+                  # ------------------------------------------------
+                  # First attempt: terminate the process launched
+                  # by this service.
+                  # ------------------------------------------------
 
                   if kill -0 "$FIREFOX_PID" 2>/dev/null
                   then
@@ -437,18 +647,16 @@
                   fi
 
 
-                  # =================================================
+                  # ------------------------------------------------
                   # Wait for graceful exit
-                  # =================================================
+                  # ------------------------------------------------
 
                   for i in $(seq 1 10)
                   do
 
                       if ! kill -0 "$FIREFOX_PID" 2>/dev/null
                       then
-
                           break
-
                       fi
 
                       sleep 0.5
@@ -456,31 +664,32 @@
                   done
 
 
-                  # =================================================
-                  # Force close if necessary
-                  # =================================================
+                  # ------------------------------------------------
+                  # Force close launcher if necessary
+                  # ------------------------------------------------
 
                   if kill -0 "$FIREFOX_PID" 2>/dev/null
                   then
 
-                      log "Firefox still running."
-                      log "Force closing kiosk Firefox."
+                      log "Firefox launcher still running."
+                      log "Force closing."
 
                       kill -KILL "$FIREFOX_PID" 2>/dev/null || true
 
                   fi
 
 
-                  log "Kiosk Firefox closed."
+                  log "Kiosk Firefox close command completed."
 
 
-                  # =================================================
+                  # ------------------------------------------------
                   # Remove dedicated kiosk profile
-                  # =================================================
+                  # ------------------------------------------------
 
-                  rm -rf "$FIREFOX_PROFILE"
+                  runuser -u "$GUI_USER" -- rm -rf "$FIREFOX_PROFILE" 2>/dev/null || true
 
                   log "Kiosk Firefox profile removed."
+
                   log "Security Awareness Kiosk completed."
 
                   break
@@ -491,7 +700,7 @@
 
 
           # =====================================================
-          # Launcher finished
+          # Finished
           # =====================================================
 
           log "Security Awareness launcher exiting."
@@ -500,22 +709,32 @@
 
 
     # =========================================================
-    # 3. Remove old XFCE/XDG autostart entry
+    # 3. Remove old XDG autostart
     # =========================================================
 
-    - name: Remove old autostart entry if present
+    - name: Remove old XDG autostart entry
       ansible.builtin.file:
-        path: "{{ autostart_file }}"
+        path: "{{ old_autostart_file }}"
         state: absent
 
 
     # =========================================================
-    # 4. Create systemd user service directory
+    # 4. Remove old systemd USER service
     # =========================================================
 
-    - name: Ensure systemd user directory exists
+    - name: Remove old systemd user service
       ansible.builtin.file:
-        path: "{{ systemd_user_directory }}"
+        path: "{{ old_user_service_file }}"
+        state: absent
+
+
+    # =========================================================
+    # 5. Create SYSTEM-level systemd directory
+    # =========================================================
+
+    - name: Ensure systemd system directory exists
+      ansible.builtin.file:
+        path: "/etc/systemd/system"
         state: directory
         owner: root
         group: root
@@ -523,10 +742,10 @@
 
 
     # =========================================================
-    # 5. Create systemd user service
+    # 6. Create SYSTEM-level service
     # =========================================================
 
-    - name: Create Security Awareness kiosk systemd user service
+    - name: Create Security Awareness system boot service
       ansible.builtin.copy:
         dest: "{{ systemd_service_file }}"
         owner: root
@@ -535,91 +754,129 @@
 
         content: |
           [Unit]
-          Description=Security Awareness Kiosk Launcher
+          Description=Security Awareness Firefox Kiosk - Boot Startup
 
-          # Start after graphical session target
-          After=graphical-session.target
+          # Start after the graphical target.
+          # The launcher itself waits for the actual user
+          # graphical session to become available.
+          After=graphical.target
+          Wants=graphical.target
 
           [Service]
           Type=simple
 
-          # Security Awareness launcher
+          # Run as root because the service must discover the
+          # graphical user/session during system startup.
+          User=root
+
           ExecStart={{ launcher_path }}
 
-          # Do not restart after launcher exits
+          # Do not continuously restart after completion.
           Restart=no
 
-          # Allow GUI initialization
-          TimeoutStartSec=40
+          # Allow enough time for the graphical session to
+          # become available.
+          TimeoutStartSec=180
 
           [Install]
-          WantedBy=graphical-session.target
+          WantedBy=graphical.target
 
 
     # =========================================================
-    # 6. Enable systemd user service globally
+    # 7. Reload SYSTEM systemd
     #
-    # IMPORTANT:
+    # This is valid because this is the SYSTEM manager.
+    #
     # Do NOT use:
-    #
     # systemctl --global daemon-reload
+    # =========================================================
+
+    - name: Reload systemd system manager
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+
+    # =========================================================
+    # 8. Enable service for MACHINE BOOT
+    # =========================================================
+
+    - name: Enable Security Awareness kiosk at boot
+      ansible.builtin.systemd:
+        name: security-awareness-kiosk.service
+        enabled: true
+
+
+    # =========================================================
+    # 9. Make sure service is not currently running
     #
-    # because --global does not support daemon-reload.
+    # We don't start it during AWX deployment because the
+    # current Ansible SSH session may not have the graphical
+    # environment required for Firefox.
+    #
+    # It will start automatically at the next machine boot.
     # =========================================================
 
-    - name: Enable Security Awareness kiosk service globally
+    - name: Stop kiosk service after deployment if currently running
+      ansible.builtin.systemd:
+        name: security-awareness-kiosk.service
+        state: stopped
+      failed_when: false
+
+
+    # =========================================================
+    # 10. Check service enabled status
+    # =========================================================
+
+    - name: Check kiosk service enabled status
       ansible.builtin.command:
-        cmd: systemctl --global enable security-awareness-kiosk.service
-      register: systemd_enable_result
-      changed_when: >
-        'Created symlink' in systemd_enable_result.stdout or
-        'Created symlink' in systemd_enable_result.stderr
-
-
-    # =========================================================
-    # 7. Verify global systemd user service
-    # =========================================================
-
-    - name: Verify global systemd user service
-      ansible.builtin.command:
-        cmd: systemctl --global is-enabled security-awareness-kiosk.service
-      register: systemd_enabled_status
+        cmd: systemctl is-enabled security-awareness-kiosk.service
+      register: service_enabled
       changed_when: false
       failed_when: false
 
 
     # =========================================================
-    # 8. Verify launcher
+    # 11. Check launcher
     # =========================================================
 
-    - name: Verify launcher
+    - name: Check launcher
       ansible.builtin.stat:
         path: "{{ launcher_path }}"
       register: launcher_status
 
 
     # =========================================================
-    # 9. Verify systemd service file
+    # 12. Check systemd service
     # =========================================================
 
-    - name: Verify systemd service file
+    - name: Check systemd service
       ansible.builtin.stat:
         path: "{{ systemd_service_file }}"
-      register: systemd_service_status
+      register: service_status
 
 
     # =========================================================
-    # 10. Verify old autostart is removed
+    # 13. Check old XDG autostart
     # =========================================================
 
-    - name: Verify old autostart is removed
+    - name: Check old XDG autostart
       ansible.builtin.stat:
-        path: "{{ autostart_file }}"
+        path: "{{ old_autostart_file }}"
       register: old_autostart_status
 
 
     # =========================================================
-    # 11. Check Firefox
+    # 14. Check old user service
+    # =========================================================
+
+    - name: Check old user service
+      ansible.builtin.stat:
+        path: "{{ old_user_service_file }}"
+      register: old_user_service_status
+
+
+    # =========================================================
+    # 15. Check Firefox
     # =========================================================
 
     - name: Check Firefox
@@ -641,7 +898,7 @@
 
 
     # =========================================================
-    # 12. Check curl
+    # 16. Check curl
     # =========================================================
 
     - name: Check curl
@@ -653,27 +910,30 @@
 
 
     # =========================================================
-    # 13. Display deployment result
+    # 17. Display final result
     # =========================================================
 
     - name: Display deployment result
       ansible.builtin.debug:
         msg:
           - "=========================================="
-          - "Security Awareness Linux Deployment"
+          - "Security Awareness BOOT Kiosk"
           - "=========================================="
+          - "Kiosk user: {{ kiosk_user }}"
           - "Launcher exists: {{ launcher_status.stat.exists }}"
-          - "Systemd service exists: {{ systemd_service_status.stat.exists }}"
-          - "Systemd enabled: {{ systemd_enabled_status.stdout | default('unknown') }}"
-          - "Old autostart exists: {{ old_autostart_status.stat.exists }}"
+          - "System service exists: {{ service_status.stat.exists }}"
+          - "System service enabled: {{ service_enabled.stdout | default('unknown') }}"
+          - "Old XDG autostart exists: {{ old_autostart_status.stat.exists }}"
+          - "Old user service exists: {{ old_user_service_status.stat.exists }}"
           - "Firefox: {{ firefox_check.stdout | default('NOT FOUND') }}"
           - "Curl installed: {{ curl_check.rc == 0 }}"
           - "Launcher: {{ launcher_path }}"
-          - "Systemd service: {{ systemd_service_file }}"
+          - "System service: {{ systemd_service_file }}"
           - "Backend: {{ backend_base }}"
           - "Awareness URL: {{ awareness_base_url }}"
-          - "GUI wait time: 30 seconds"
-          - "Polling interval: 2 seconds"
+          - "Startup type: MACHINE BOOT"
+          - "GUI wait time: 120 seconds"
+          - "API polling interval: 2 seconds"
           - "API timeout: 2 seconds"
           - "Result display time: 8 seconds"
           - "Debug log: /tmp/security-awareness-kiosk.log"
