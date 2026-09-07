@@ -1,529 +1,623 @@
 ---
-- name: Configure Security Awareness Kiosk for all Linux GUI users
+- name: Deploy Security Awareness Native Desktop Application
   hosts: ansibletesting
   become: true
   gather_facts: true
 
   vars:
-    kiosk_dir: /opt/security-awareness
-    launcher_path: /opt/security-awareness/kiosk-launcher-linux.sh
-    desktop_file: /etc/xdg/autostart/security-awareness-kiosk.desktop
+    app_dir: /opt/security-awareness
+    app_path: /opt/security-awareness/security-awareness-app.py
+    desktop_file: /etc/xdg/autostart/security-awareness.desktop
 
     backend_base: "http://172.17.6.142:5000/api/awareness"
     awareness_page: "http://172.17.6.142:5000/awareness.html"
 
   tasks:
 
-    # ============================================================
-    # 1. Create application directory
-    # ============================================================
+    # ---------------------------------------------------------
+    # 1. Install required Linux GUI components
+    # ---------------------------------------------------------
 
-    - name: Create security awareness directory
+    - name: Install GTK and WebKit dependencies
+      ansible.builtin.apt:
+        name:
+          - python3
+          - python3-gi
+          - python3-cairo
+          - gir1.2-gtk-3.0
+          - gir1.2-webkit2-4.1
+          - curl
+        state: present
+        update_cache: true
+
+
+    # ---------------------------------------------------------
+    # 2. Create application directory
+    # ---------------------------------------------------------
+
+    - name: Create Security Awareness application directory
       ansible.builtin.file:
-        path: "{{ kiosk_dir }}"
+        path: "{{ app_dir }}"
         state: directory
         owner: root
         group: root
         mode: "0755"
 
 
-    # ============================================================
-    # 2. Remove old user-specific LightDM autologin configuration
-    # ============================================================
+    # ---------------------------------------------------------
+    # 3. Remove old Firefox launcher
+    # ---------------------------------------------------------
 
-    - name: Remove previous user-specific LightDM autologin configuration
+    - name: Remove old Firefox kiosk launcher
       ansible.builtin.file:
-        path: /etc/lightdm/lightdm.conf.d/90-security-awareness-autologin.conf
+        path: /opt/security-awareness/kiosk-launcher-linux.sh
         state: absent
 
 
-    # ============================================================
-    # 3. Create the kiosk launcher
-    # ============================================================
+    - name: Remove old Firefox autostart
+      ansible.builtin.file:
+        path: /etc/xdg/autostart/security-awareness-kiosk.desktop
+        state: absent
 
-    - name: Create security awareness kiosk launcher
+
+    # ---------------------------------------------------------
+    # 4. Create native GTK/WebKit application
+    # ---------------------------------------------------------
+
+    - name: Create Security Awareness native application
       ansible.builtin.copy:
-        dest: "{{ launcher_path }}"
+        dest: "{{ app_path }}"
         owner: root
         group: root
         mode: "0755"
+
         content: |
-          #!/bin/bash
+          #!/usr/bin/env python3
 
-          BACKEND_BASE="{{ backend_base }}"
-          AWARENESS_PAGE="{{ awareness_page }}"
+          import os
+          import sys
+          import time
+          import socket
+          import subprocess
 
-          LOG="/tmp/security-awareness-kiosk-${UID}.log"
+          import gi
 
-          log()
-          {
-              echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOG"
-          }
+          gi.require_version("Gtk", "3.0")
+          gi.require_version("WebKit2", "4.1")
 
-          log "=============================================="
-          log "Security Awareness Kiosk launcher started"
-          log "USER=$USER"
-          log "UID=$UID"
-          log "HOME=$HOME"
-          log "=============================================="
+          from gi.repository import Gtk, GLib, WebKit2
 
 
-          # ========================================================
-          # Find graphical desktop session
-          #
-          # Supports:
-          #   XFCE
-          #   Cinnamon
-          #   GNOME
-          #   MATE
-          #
-          # We obtain DISPLAY/XAUTHORITY from the actual
-          # graphical session instead of hardcoding :0 or :10.
-          # ========================================================
+          # =========================================================
+          # Configuration
+          # =========================================================
 
-          DISPLAY_FOUND=""
-          XAUTHORITY_FOUND=""
+          BACKEND_BASE = "{{ backend_base }}"
+          AWARENESS_PAGE = "{{ awareness_page }}"
 
-          SESSION_PROCS="xfce4-session cinnamon-session gnome-session mate-session"
+          HOSTNAME = socket.gethostname()
 
-          for PROC_NAME in $SESSION_PROCS; do
-
-              for PID in $(pgrep -u "$UID" -x "$PROC_NAME" 2>/dev/null); do
-
-                  if [ -r "/proc/$PID/environ" ]; then
-
-                      PROC_DISPLAY=$(
-                          tr '\0' '\n' < "/proc/$PID/environ" 2>/dev/null |
-                          sed -n 's/^DISPLAY=//p' |
-                          head -n 1
-                      )
-
-                      PROC_XAUTHORITY=$(
-                          tr '\0' '\n' < "/proc/$PID/environ" 2>/dev/null |
-                          sed -n 's/^XAUTHORITY=//p' |
-                          head -n 1
-                      )
-
-                      if [ -n "$PROC_DISPLAY" ]; then
-
-                          DISPLAY_FOUND="$PROC_DISPLAY"
-                          XAUTHORITY_FOUND="$PROC_XAUTHORITY"
-
-                          log "Found graphical session process: $PROC_NAME"
-                          log "Session PID: $PID"
-
-                          break 2
-
-                      fi
-
-                  fi
-
-              done
-
-          done
-
-
-          # ========================================================
-          # Fallback to environment variables
-          # ========================================================
-
-          if [ -z "$DISPLAY_FOUND" ] && [ -n "$DISPLAY" ]; then
-              DISPLAY_FOUND="$DISPLAY"
-              log "Using existing DISPLAY=$DISPLAY_FOUND"
-          fi
-
-
-          if [ -z "$XAUTHORITY_FOUND" ] && [ -n "$XAUTHORITY" ]; then
-              XAUTHORITY_FOUND="$XAUTHORITY"
-              log "Using existing XAUTHORITY=$XAUTHORITY_FOUND"
-          fi
-
-
-          # ========================================================
-          # XAUTHORITY fallback
-          # ========================================================
-
-          if [ -z "$XAUTHORITY_FOUND" ]; then
-
-              if [ -f "$HOME/.Xauthority" ]; then
-                  XAUTHORITY_FOUND="$HOME/.Xauthority"
-              else
-                  XAUTHORITY_FOUND="$HOME/.Xauthority"
-              fi
-
-          fi
-
-
-          # ========================================================
-          # Make sure graphical display was found
-          # ========================================================
-
-          if [ -z "$DISPLAY_FOUND" ]; then
-
-              log "ERROR: No graphical DISPLAY found."
-              log "User is probably not inside a graphical session."
-              log "Exiting without locking the user."
-
-              exit 0
-
-          fi
-
-
-          export DISPLAY="$DISPLAY_FOUND"
-          export XAUTHORITY="$XAUTHORITY_FOUND"
-
-          log "DISPLAY=$DISPLAY"
-          log "XAUTHORITY=$XAUTHORITY"
-
-
-          # ========================================================
-          # Check curl
-          # ========================================================
-
-          if ! command -v curl >/dev/null 2>&1; then
-
-              log "ERROR: curl is not installed."
-              log "Exiting."
-
-              exit 0
-
-          fi
-
-
-          # ========================================================
-          # Determine hostname
-          # ========================================================
-
-          HOSTNAME_VALUE="$(hostname)"
-
-          log "Hostname=$HOSTNAME_VALUE"
-
-
-          # ========================================================
-          # Completion status API
-          # ========================================================
-
-          STATUS_URL="${BACKEND_BASE}/status?hostname=${HOSTNAME_VALUE}"
-
-          log "Checking completion status."
-          log "STATUS_URL=$STATUS_URL"
-
-
-          # ========================================================
-          # Initial backend check
-          #
-          # connect timeout = 2 seconds
-          # total timeout   = 2 seconds
-          #
-          # If backend is unavailable:
-          #   FAIL OPEN
-          #   Do NOT lock the user
-          # ========================================================
-
-          STATUS_RESPONSE=$(
-              curl \
-                  --silent \
-                  --show-error \
-                  --connect-timeout 2 \
-                  --max-time 2 \
-                  "$STATUS_URL" \
-                  2>/dev/null
+          STATUS_URL = (
+              BACKEND_BASE
+              + "/status?hostname="
+              + HOSTNAME
           )
 
-          CURL_RESULT=$?
+          AWARENESS_URL = (
+              AWARENESS_PAGE
+              + "?host="
+              + HOSTNAME
+          )
+
+          POLL_INTERVAL = 2
+          RESULT_DISPLAY_SECONDS = 8
+
+          LOG_FILE = (
+              "/tmp/security-awareness-native-"
+              + str(os.getuid())
+              + ".log"
+          )
 
 
-          if [ "$CURL_RESULT" -ne 0 ]; then
+          # =========================================================
+          # Logging
+          # =========================================================
 
-              log "Backend unavailable."
-              log "Failing open."
-              log "Firefox will NOT be launched."
+          def log(message):
+              timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
 
-              exit 0
-
-          fi
-
-
-          log "Initial backend response: $STATUS_RESPONSE"
-
-
-          # ========================================================
-          # Already completed
-          # ========================================================
-
-          if echo "$STATUS_RESPONSE" |
-             grep -q '"completed"[[:space:]]*:[[:space:]]*true'; then
-
-              log "Security awareness already completed."
-              log "Firefox will NOT be launched."
-
-              exit 0
-
-          fi
+              try:
+                  with open(LOG_FILE, "a") as f:
+                      f.write(
+                          timestamp
+                          + " "
+                          + message
+                          + "\n"
+                      )
+              except Exception:
+                  pass
 
 
-          # ========================================================
-          # Firefox check
-          # ========================================================
+          # =========================================================
+          # Backend status
+          # =========================================================
 
-          FIREFOX="$(command -v firefox 2>/dev/null)"
+          def check_backend():
 
-          if [ -z "$FIREFOX" ]; then
+              try:
 
-              log "ERROR: Firefox is not installed."
-              log "Exiting."
+                  result = subprocess.run(
+                      [
+                          "curl",
+                          "--silent",
+                          "--show-error",
+                          "--connect-timeout",
+                          "2",
+                          "--max-time",
+                          "2",
+                          STATUS_URL
+                      ],
+                      stdout=subprocess.PIPE,
+                      stderr=subprocess.PIPE,
+                      text=True,
+                      timeout=3
+                  )
 
-              exit 0
+                  if result.returncode != 0:
 
-          fi
+                      log(
+                          "Backend unavailable. "
+                          "Return code="
+                          + str(result.returncode)
+                      )
 
+                      return None
 
-          log "Firefox found at $FIREFOX"
+                  response = result.stdout.strip()
 
+                  log(
+                      "Backend response: "
+                      + response
+                  )
 
-          # ========================================================
-          # Dedicated Firefox profile
-          #
-          # This keeps the user's normal Firefox profile untouched.
-          # ========================================================
+                  if '"completed":true' in response:
 
-          PROFILE_DIR="$HOME/.security-awareness-firefox"
+                      return True
 
-          mkdir -p "$PROFILE_DIR"
+                  if '"completed": true' in response:
 
-          log "Firefox profile=$PROFILE_DIR"
+                      return True
 
+                  return False
 
-          # ========================================================
-          # Build awareness URL
-          # ========================================================
+              except Exception as e:
 
-          KIOSK_URL="${AWARENESS_PAGE}?host=${HOSTNAME_VALUE}"
+                  log(
+                      "Backend check exception: "
+                      + str(e)
+                  )
 
-          log "Kiosk URL=$KIOSK_URL"
-
-
-          # ========================================================
-          # Launch Firefox in kiosk mode
-          # ========================================================
-
-          log "Launching Firefox kiosk."
-
-          "$FIREFOX" \
-              --no-remote \
-              --new-instance \
-              --profile "$PROFILE_DIR" \
-              --kiosk \
-              "$KIOSK_URL" \
-              >/dev/null 2>&1 &
-
-          FIREFOX_PID=$!
-
-          log "Firefox PID=$FIREFOX_PID"
-
-
-          # ========================================================
-          # Poll completion status every 2 seconds
-          # ========================================================
-
-          while kill -0 "$FIREFOX_PID" 2>/dev/null; do
-
-              sleep 2
+                  return None
 
 
-              STATUS_RESPONSE=$(
-                  curl \
-                      --silent \
-                      --show-error \
-                      --connect-timeout 2 \
-                      --max-time 2 \
-                      "$STATUS_URL" \
-                      2>/dev/null
+          # =========================================================
+          # Main GTK Application
+          # =========================================================
+
+          class SecurityAwarenessApp:
+
+              def __init__(self):
+
+                  log("==============================================")
+                  log("Security Awareness Native Application started")
+                  log("USER=" + os.environ.get("USER", ""))
+                  log("UID=" + str(os.getuid()))
+                  log("HOME=" + os.environ.get("HOME", ""))
+                  log("HOSTNAME=" + HOSTNAME)
+                  log("STATUS_URL=" + STATUS_URL)
+                  log("AWARENESS_URL=" + AWARENESS_URL)
+                  log("==============================================")
+
+
+                  # -------------------------------------------------
+                  # Initial backend check
+                  # -------------------------------------------------
+
+                  status = check_backend()
+
+                  if status is None:
+
+                      log(
+                          "Backend unavailable initially."
+                      )
+
+                      log(
+                          "Failing open."
+                      )
+
+                      log(
+                          "Application will NOT open."
+                      )
+
+                      sys.exit(0)
+
+
+                  if status is True:
+
+                      log(
+                          "Security awareness already completed."
+                      )
+
+                      log(
+                          "Application will NOT open."
+                      )
+
+                      sys.exit(0)
+
+
+                  log(
+                      "Security awareness is pending."
+                  )
+
+                  log(
+                      "Starting native application."
+                  )
+
+
+                  # -------------------------------------------------
+                  # GTK Window
+                  # -------------------------------------------------
+
+                  self.window = Gtk.Window(
+                      title="Security Awareness Training"
+                  )
+
+                  self.window.set_default_size(
+                      1100,
+                      700
+                  )
+
+                  self.window.set_position(
+                      Gtk.WindowPosition.CENTER
+                  )
+
+                  self.window.set_resizable(True)
+
+                  self.window.set_keep_above(True)
+
+                  self.window.set_modal(True)
+
+                  self.window.connect(
+                      "delete-event",
+                      self.prevent_close
+                  )
+
+
+                  # -------------------------------------------------
+                  # WebKit browser engine
+                  #
+                  # This is NOT Firefox.
+                  # The awareness page is embedded directly inside
+                  # this Linux application window.
+                  # -------------------------------------------------
+
+                  self.webview = WebKit2.WebView()
+
+                  settings = self.webview.get_settings()
+
+                  settings.set_enable_javascript(True)
+
+                  settings.set_enable_plugins(False)
+
+                  settings.set_enable_webgl(True)
+
+                  settings.set_allow_file_access_from_file_urls(False)
+
+                  settings.set_allow_universal_access_from_file_urls(False)
+
+
+                  # -------------------------------------------------
+                  # Load awareness application
+                  # -------------------------------------------------
+
+                  self.webview.load_uri(
+                      AWARENESS_URL
+                  )
+
+
+                  self.window.add(
+                      self.webview
+                  )
+
+
+                  # -------------------------------------------------
+                  # Show application
+                  # -------------------------------------------------
+
+                  self.window.show_all()
+
+
+                  log(
+                      "Native Security Awareness window opened."
+                  )
+
+
+                  # -------------------------------------------------
+                  # Start backend polling
+                  # -------------------------------------------------
+
+                  GLib.timeout_add_seconds(
+                      POLL_INTERVAL,
+                      self.poll_status
+                  )
+
+
+              # =====================================================
+              # Prevent user from closing the awareness application
+              # =====================================================
+
+              def prevent_close(
+                  self,
+                  widget,
+                  event
+              ):
+
+                  log(
+                      "User attempted to close application."
+                  )
+
+                  return True
+
+
+              # =====================================================
+              # Poll backend
+              # =====================================================
+
+              def poll_status(self):
+
+                  status = check_backend()
+
+
+                  # -----------------------------------------------
+                  # Backend temporarily unavailable
+                  # -----------------------------------------------
+
+                  if status is None:
+
+                      log(
+                          "Backend temporarily unavailable."
+                      )
+
+                      log(
+                          "Keeping application open."
+                      )
+
+                      return True
+
+
+                  # -----------------------------------------------
+                  # Test completed
+                  # -----------------------------------------------
+
+                  if status is True:
+
+                      log(
+                          "=============================================="
+                      )
+
+                      log(
+                          "Security awareness completed."
+                      )
+
+                      log(
+                          "Keeping result visible for "
+                          + str(RESULT_DISPLAY_SECONDS)
+                          + " seconds."
+                      )
+
+                      log(
+                          "=============================================="
+                      )
+
+
+                      # Stop polling
+
+                      self.show_completed_message()
+
+
+                      GLib.timeout_add_seconds(
+                          RESULT_DISPLAY_SECONDS,
+                          self.close_application
+                      )
+
+
+                      return False
+
+
+                  # -----------------------------------------------
+                  # Still pending
+                  # -----------------------------------------------
+
+                  log(
+                      "Security awareness still pending."
+                  )
+
+                  return True
+
+
+              # =====================================================
+              # Completion message
+              # =====================================================
+
+              def show_completed_message(self):
+
+                  log(
+                      "Completion detected."
+                  )
+
+                  # Do not replace the test page.
+                  # The score/result remains visible.
+
+                  self.window.set_title(
+                      "Security Awareness Training - Completed"
+                  )
+
+
+              # =====================================================
+              # Close application
+              # =====================================================
+
+              def close_application(self):
+
+                  log(
+                      "Closing Security Awareness application."
+                  )
+
+                  self.window.destroy()
+
+                  Gtk.main_quit()
+
+                  return False
+
+
+          # =========================================================
+          # Start application
+          # =========================================================
+
+          try:
+
+              app = SecurityAwarenessApp()
+
+              Gtk.main()
+
+          except SystemExit:
+
+              raise
+
+          except Exception as e:
+
+              log(
+                  "FATAL APPLICATION ERROR: "
+                  + str(e)
               )
 
-              CURL_RESULT=$?
+              sys.exit(0)
 
 
-              if [ "$CURL_RESULT" -ne 0 ]; then
+    # ---------------------------------------------------------
+    # 5. Create system-wide autostart
+    # ---------------------------------------------------------
 
-                  log "Backend temporarily unavailable."
-                  log "Continuing kiosk."
-
-                  continue
-
-              fi
-
-
-              log "Status response: $STATUS_RESPONSE"
-
-
-              # ====================================================
-              # Completion detected
-              # ====================================================
-
-              if echo "$STATUS_RESPONSE" |
-                 grep -q '"completed"[[:space:]]*:[[:space:]]*true'; then
-
-                  log "=============================================="
-                  log "Security awareness completed."
-                  log "Keeping result visible for 8 seconds."
-                  log "=============================================="
-
-
-                  sleep 8
-
-
-                  # =================================================
-                  # Close only this Firefox process
-                  # =================================================
-
-                  if kill -0 "$FIREFOX_PID" 2>/dev/null; then
-
-                      log "Closing kiosk Firefox."
-
-                      kill "$FIREFOX_PID" 2>/dev/null
-
-                      sleep 2
-
-                  fi
-
-
-                  # =================================================
-                  # Force close if still running
-                  # =================================================
-
-                  if kill -0 "$FIREFOX_PID" 2>/dev/null; then
-
-                      log "Firefox still running."
-                      log "Force terminating kiosk Firefox."
-
-                      kill -9 "$FIREFOX_PID" 2>/dev/null
-
-                  fi
-
-
-                  log "Kiosk Firefox closed."
-
-                  exit 0
-
-              fi
-
-          done
-
-
-          # ========================================================
-          # Firefox exited by itself
-          # ========================================================
-
-          log "Firefox kiosk process exited."
-
-          exit 0
-
-
-    # ============================================================
-    # 4. Create system-wide XDG autostart
-    #
-    # This applies to every user who starts a graphical session.
-    #
-    # No specific username.
-    # No automatic login.
-    # ============================================================
-
-    - name: Create system-wide security awareness autostart
+    - name: Create system-wide Security Awareness autostart
       ansible.builtin.copy:
         dest: "{{ desktop_file }}"
         owner: root
         group: root
         mode: "0644"
+
         content: |
           [Desktop Entry]
           Type=Application
-          Name=Security Awareness Kiosk
-          Comment=Security Awareness Training
-          Exec=/opt/security-awareness/kiosk-launcher-linux.sh
+          Name=Security Awareness Training
+          Comment=Security Awareness Mock Test
+          Exec=/usr/bin/python3 /opt/security-awareness/security-awareness-app.py
           Terminal=false
-          StartupNotify=false
+          StartupNotify=true
+
           X-GNOME-Autostart-enabled=true
           X-Cinnamon-Autostart-enabled=true
           X-XFCE-Autostart-enabled=true
 
 
-    # ============================================================
-    # 5. Remove old per-user autostart files safely
-    #
-    # Do NOT recursively scan thinclient_drives.
-    # ============================================================
+    # ---------------------------------------------------------
+    # 6. Remove previous per-user autostart
+    # ---------------------------------------------------------
 
-    - name: Remove old per-user autostart if present
+    - name: Remove old per-user Security Awareness autostart
       ansible.builtin.shell: |
         for home_dir in /home/*; do
-
           if [ -d "$home_dir/.config/autostart" ]; then
-
-            rm -f \
-              "$home_dir/.config/autostart/security-awareness-kiosk.desktop"
-
+            rm -f "$home_dir/.config/autostart/security-awareness-kiosk.desktop"
           fi
-
         done
       args:
         executable: /bin/bash
       changed_when: false
 
 
-    # ============================================================
-    # 6. Verify launcher
-    # ============================================================
+    # ---------------------------------------------------------
+    # 7. Remove old automatic login configuration
+    # ---------------------------------------------------------
 
-    - name: Verify kiosk launcher
+    - name: Remove Security Awareness automatic login configuration
+      ansible.builtin.file:
+        path: /etc/lightdm/lightdm.conf.d/90-security-awareness-autologin.conf
+        state: absent
+
+
+    # ---------------------------------------------------------
+    # 8. Verify Python application
+    # ---------------------------------------------------------
+
+    - name: Verify native application exists
       ansible.builtin.stat:
-        path: "{{ launcher_path }}"
-      register: launcher_stat
+        path: "{{ app_path }}"
+      register: app_stat
 
 
-    # ============================================================
-    # 7. Verify autostart file
-    # ============================================================
+    # ---------------------------------------------------------
+    # 9. Verify autostart
+    # ---------------------------------------------------------
 
-    - name: Verify system-wide autostart
+    - name: Verify system autostart exists
       ansible.builtin.stat:
         path: "{{ desktop_file }}"
       register: desktop_stat
 
 
-    # ============================================================
-    # 8. Verify Firefox is installed
-    # ============================================================
+    # ---------------------------------------------------------
+    # 10. Verify GTK/WebKit
+    # ---------------------------------------------------------
 
-    - name: Check Firefox installation
+    - name: Verify GTK Python support
       ansible.builtin.command:
-        cmd: which firefox
-      register: firefox_check
+        cmd: python3 -c "import gi; gi.require_version('Gtk','3.0'); from gi.repository import Gtk"
+      register: gtk_check
       changed_when: false
       failed_when: false
 
 
-    # ============================================================
-    # 9. Final result
-    # ============================================================
+    - name: Verify WebKit Python support
+      ansible.builtin.command:
+        cmd: python3 -c "import gi; gi.require_version('WebKit2','4.1'); from gi.repository import WebKit2"
+      register: webkit_check
+      changed_when: false
+      failed_when: false
+
+
+    # ---------------------------------------------------------
+    # 11. Deployment result
+    # ---------------------------------------------------------
 
     - name: Show deployment result
       ansible.builtin.debug:
         msg:
-          - "=============================================="
-          - "Security Awareness Kiosk Deployment Complete"
-          - "=============================================="
-          - "Launcher: {{ launcher_path }}"
-          - "Launcher exists: {{ launcher_stat.stat.exists }}"
+          - "=================================================="
+          - "Security Awareness Native Application Deployed"
+          - "=================================================="
+          - "Application: {{ app_path }}"
+          - "Application exists: {{ app_stat.stat.exists }}"
           - "Autostart: {{ desktop_file }}"
           - "Autostart exists: {{ desktop_stat.stat.exists }}"
-          - "Firefox: {{ firefox_check.stdout | default('NOT FOUND') }}"
+          - "GTK support: {{ 'OK' if gtk_check.rc == 0 else 'FAILED' }}"
+          - "WebKit support: {{ 'OK' if webkit_check.rc == 0 else 'FAILED' }}"
           - "Backend: {{ backend_base }}"
           - "Awareness page: {{ awareness_page }}"
-          - "Applies to: ALL GUI USERS"
           - "Desktop support: XFCE + Cinnamon"
+          - "Applies to: ALL GUI USERS"
+          - "Firefox: NOT USED"
           - "Automatic login: DISABLED"
-          - "Backend unavailable: FAIL OPEN"
-          - "Polling interval: 2 seconds"
-          - "Result display time: 8 seconds"
-          - "=============================================="
+          - "Backend unavailable initially: FAIL OPEN"
+          - "Status polling: Every 2 seconds"
+          - "Result display: 8 seconds"
+          - "=================================================="
