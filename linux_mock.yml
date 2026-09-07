@@ -16,6 +16,10 @@
 
   tasks:
 
+    # =========================================================
+    # 1. Create application directory
+    # =========================================================
+
     - name: Create Security Awareness directory
       ansible.builtin.file:
         path: "{{ launcher_directory }}"
@@ -23,6 +27,11 @@
         owner: root
         group: root
         mode: "0755"
+
+
+    # =========================================================
+    # 2. Create Firefox kiosk launcher script
+    # =========================================================
 
     - name: Create Firefox kiosk launcher script
       ansible.builtin.copy:
@@ -36,8 +45,13 @@
           BACKEND_BASE="{{ backend_base }}"
           AWARENESS_BASE_URL="{{ awareness_base_url }}"
 
-          POLL_SECONDS=3
+          # Check backend every 2 seconds
+          POLL_SECONDS=2
 
+          # Keep result screen visible for 8 seconds
+          COMPLETION_GRACE_SECONDS=8
+
+          # Dedicated Firefox kiosk profile
           KIOSK_DIRECTORY="$HOME/.security-awareness"
           FIREFOX_PROFILE="$KIOSK_DIRECTORY/firefox-kiosk-profile"
 
@@ -48,27 +62,31 @@
           # Pass hostname to awareness page
           AWARENESS_URL="${AWARENESS_BASE_URL}?host=${HOSTNAME_VALUE}"
 
-          # ---------------------------------------------------
-          # Check completion before launching Firefox
-          # ---------------------------------------------------
+
+          # ===================================================
+          # Check completion BEFORE opening Firefox
+          # ===================================================
 
           STATUS=$(curl -sS \
-              --connect-timeout 5 \
-              --max-time 5 \
+              --connect-timeout 2 \
+              --max-time 2 \
               "$BACKEND_BASE/status?hostname=$HOSTNAME_VALUE" \
               2>/dev/null)
 
+          # Backend unavailable -> do not lock user desktop
           if [ $? -ne 0 ]; then
               exit 0
           fi
 
+          # Already completed -> do not open kiosk
           if echo "$STATUS" | grep -q '"completed"[[:space:]]*:[[:space:]]*true'; then
               exit 0
           fi
 
-          # ---------------------------------------------------
+
+          # ===================================================
           # Find Firefox
-          # ---------------------------------------------------
+          # ===================================================
 
           FIREFOX="$(command -v firefox 2>/dev/null || true)"
 
@@ -76,15 +94,17 @@
               exit 1
           fi
 
-          # ---------------------------------------------------
+
+          # ===================================================
           # Create dedicated Firefox profile
-          # ---------------------------------------------------
+          # ===================================================
 
           mkdir -p "$FIREFOX_PROFILE"
 
-          # ---------------------------------------------------
-          # Launch Firefox kiosk
-          # ---------------------------------------------------
+
+          # ===================================================
+          # Launch Firefox immediately in kiosk mode
+          # ===================================================
 
           "$FIREFOX" \
               --no-remote \
@@ -92,11 +112,10 @@
               --kiosk \
               "$AWARENESS_URL" &
 
-          sleep 2
 
-          # ---------------------------------------------------
-          # Monitor Firefox + completion status
-          # ---------------------------------------------------
+          # ===================================================
+          # Monitor Firefox and completion status
+          # ===================================================
 
           while pgrep -f -- "$FIREFOX_PROFILE" > /dev/null 2>&1
           do
@@ -104,38 +123,54 @@
               sleep "$POLL_SECONDS"
 
               STATUS=$(curl -sS \
-                  --connect-timeout 5 \
-                  --max-time 5 \
+                  --connect-timeout 2 \
+                  --max-time 2 \
                   "$BACKEND_BASE/status?hostname=$HOSTNAME_VALUE" \
                   2>/dev/null)
 
+              # Temporary API/network failure
               if [ $? -ne 0 ]; then
                   continue
               fi
 
-              # ------------------------------------------------
+
+              # =================================================
               # Test completed
-              # ------------------------------------------------
+              # =================================================
 
               if echo "$STATUS" | grep -q '"completed"[[:space:]]*:[[:space:]]*true'; then
 
-                  # Get only Firefox processes using this profile
+                  # Give user time to view result/score
+                  sleep "$COMPLETION_GRACE_SECONDS"
+
+
+                  # Find only Firefox processes using
+                  # the dedicated kiosk profile
                   PIDS=$(pgrep -f -- "$FIREFOX_PROFILE" || true)
 
+                  # Close only kiosk Firefox
                   for PID in $PIDS
                   do
                       kill "$PID" 2>/dev/null || true
                   done
 
+
+                  # Wait briefly for Firefox to exit
                   sleep 2
 
-                  # Remove only the dedicated kiosk profile
+
+                  # Remove only kiosk profile
                   rm -rf "$FIREFOX_PROFILE"
 
                   break
               fi
 
           done
+
+
+    # =========================================================
+    # 3. Ensure system-wide autostart directory exists
+    # =========================================================
 
     - name: Ensure autostart directory exists
       ansible.builtin.file:
@@ -144,6 +179,11 @@
         owner: root
         group: root
         mode: "0755"
+
+
+    # =========================================================
+    # 4. Create Firefox kiosk autostart entry
+    # =========================================================
 
     - name: Create Firefox kiosk autostart entry
       ansible.builtin.copy:
@@ -160,15 +200,30 @@
           Terminal=false
           X-GNOME-Autostart-enabled=true
 
+
+    # =========================================================
+    # 5. Verify launcher
+    # =========================================================
+
     - name: Verify launcher
       ansible.builtin.stat:
         path: "{{ launcher_path }}"
       register: launcher_status
 
+
+    # =========================================================
+    # 6. Verify autostart
+    # =========================================================
+
     - name: Verify autostart
       ansible.builtin.stat:
         path: "{{ autostart_file }}"
       register: autostart_status
+
+
+    # =========================================================
+    # 7. Display deployment result
+    # =========================================================
 
     - name: Display deployment result
       ansible.builtin.debug:
@@ -178,4 +233,7 @@
           - "Autostart exists: {{ autostart_status.stat.exists }}"
           - "Launcher: {{ launcher_path }}"
           - "Autostart: {{ autostart_file }}"
-          - "Firefox URL base: {{ awareness_base_url }}"
+          - "Firefox URL: {{ awareness_base_url }}"
+          - "Polling interval: 2 seconds"
+          - "API timeout: 2 seconds"
+          - "Result screen grace period: 8 seconds"
