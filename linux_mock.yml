@@ -1,5 +1,5 @@
 ---
-- name: Deploy Security Awareness Native Desktop Application
+- name: Deploy Security Awareness Full Screen Native Kiosk
   hosts: ansibletesting
   become: true
   gather_facts: true
@@ -14,11 +14,11 @@
 
   tasks:
 
-    # ---------------------------------------------------------
-    # 1. Install required Linux GUI components
-    # ---------------------------------------------------------
+    # =========================================================
+    # 1. Install required packages
+    # =========================================================
 
-    - name: Install GTK and WebKit dependencies
+    - name: Install Security Awareness GUI dependencies
       ansible.builtin.apt:
         name:
           - python3
@@ -31,11 +31,11 @@
         update_cache: true
 
 
-    # ---------------------------------------------------------
+    # =========================================================
     # 2. Create application directory
-    # ---------------------------------------------------------
+    # =========================================================
 
-    - name: Create Security Awareness application directory
+    - name: Create Security Awareness directory
       ansible.builtin.file:
         path: "{{ app_dir }}"
         state: directory
@@ -44,11 +44,11 @@
         mode: "0755"
 
 
-    # ---------------------------------------------------------
-    # 3. Remove old Firefox launcher
-    # ---------------------------------------------------------
+    # =========================================================
+    # 3. Remove old Firefox kiosk
+    # =========================================================
 
-    - name: Remove old Firefox kiosk launcher
+    - name: Remove old Firefox launcher
       ansible.builtin.file:
         path: /opt/security-awareness/kiosk-launcher-linux.sh
         state: absent
@@ -60,11 +60,37 @@
         state: absent
 
 
-    # ---------------------------------------------------------
-    # 4. Create native GTK/WebKit application
-    # ---------------------------------------------------------
+    # =========================================================
+    # 4. Remove old per-user autostart
+    # =========================================================
 
-    - name: Create Security Awareness native application
+    - name: Remove old per-user Security Awareness autostart
+      ansible.builtin.shell: |
+        for home_dir in /home/*; do
+          if [ -d "$home_dir/.config/autostart" ]; then
+            rm -f "$home_dir/.config/autostart/security-awareness-kiosk.desktop"
+          fi
+        done
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+
+    # =========================================================
+    # 5. Remove automatic login configuration
+    # =========================================================
+
+    - name: Remove Security Awareness automatic login configuration
+      ansible.builtin.file:
+        path: /etc/lightdm/lightdm.conf.d/90-security-awareness-autologin.conf
+        state: absent
+
+
+    # =========================================================
+    # 6. Create native GTK/WebKit kiosk application
+    # =========================================================
+
+    - name: Create Security Awareness native kiosk application
       ansible.builtin.copy:
         dest: "{{ app_path }}"
         owner: root
@@ -124,16 +150,20 @@
           # =========================================================
 
           def log(message):
+
               timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
 
               try:
+
                   with open(LOG_FILE, "a") as f:
+
                       f.write(
                           timestamp
                           + " "
                           + message
                           + "\n"
                       )
+
               except Exception:
                   pass
 
@@ -173,6 +203,7 @@
 
                       return None
 
+
                   response = result.stdout.strip()
 
                   log(
@@ -180,15 +211,19 @@
                       + response
                   )
 
+
                   if '"completed":true' in response:
 
                       return True
+
 
                   if '"completed": true' in response:
 
                       return True
 
+
                   return False
+
 
               except Exception as e:
 
@@ -201,29 +236,53 @@
 
 
           # =========================================================
-          # Main GTK Application
+          # Native Security Awareness Application
           # =========================================================
 
           class SecurityAwarenessApp:
 
+
               def __init__(self):
 
                   log("==============================================")
-                  log("Security Awareness Native Application started")
-                  log("USER=" + os.environ.get("USER", ""))
-                  log("UID=" + str(os.getuid()))
-                  log("HOME=" + os.environ.get("HOME", ""))
-                  log("HOSTNAME=" + HOSTNAME)
-                  log("STATUS_URL=" + STATUS_URL)
-                  log("AWARENESS_URL=" + AWARENESS_URL)
+                  log("Security Awareness Native Kiosk started")
+                  log(
+                      "USER="
+                      + os.environ.get("USER", "")
+                  )
+                  log(
+                      "UID="
+                      + str(os.getuid())
+                  )
+                  log(
+                      "HOME="
+                      + os.environ.get("HOME", "")
+                  )
+                  log(
+                      "HOSTNAME="
+                      + HOSTNAME
+                  )
+                  log(
+                      "DISPLAY="
+                      + os.environ.get("DISPLAY", "")
+                  )
+                  log(
+                      "STATUS_URL="
+                      + STATUS_URL
+                  )
+                  log(
+                      "AWARENESS_URL="
+                      + AWARENESS_URL
+                  )
                   log("==============================================")
 
 
-                  # -------------------------------------------------
+                  # =================================================
                   # Initial backend check
-                  # -------------------------------------------------
+                  # =================================================
 
                   status = check_backend()
+
 
                   if status is None:
 
@@ -236,7 +295,7 @@
                       )
 
                       log(
-                          "Application will NOT open."
+                          "Kiosk will NOT open."
                       )
 
                       sys.exit(0)
@@ -249,7 +308,7 @@
                       )
 
                       log(
-                          "Application will NOT open."
+                          "Kiosk will NOT open."
                       )
 
                       sys.exit(0)
@@ -260,32 +319,49 @@
                   )
 
                   log(
-                      "Starting native application."
+                      "Opening native kiosk."
                   )
 
 
-                  # -------------------------------------------------
-                  # GTK Window
-                  # -------------------------------------------------
+                  # =================================================
+                  # Create GTK window
+                  # =================================================
 
                   self.window = Gtk.Window(
                       title="Security Awareness Training"
                   )
 
-                  self.window.set_default_size(
-                      1100,
-                      700
-                  )
 
-                  self.window.set_position(
-                      Gtk.WindowPosition.CENTER
-                  )
+                  # -------------------------------------------------
+                  # Remove ALL window decorations
+                  #
+                  # Removes:
+                  # - title bar
+                  # - minimize
+                  # - maximize
+                  # - close
+                  # -------------------------------------------------
 
-                  self.window.set_resizable(True)
+                  self.window.set_decorated(False)
+
+
+                  # -------------------------------------------------
+                  # Full-screen kiosk
+                  # -------------------------------------------------
+
+                  self.window.fullscreen()
+
+
+                  # -------------------------------------------------
+                  # Keep above other windows
+                  # -------------------------------------------------
 
                   self.window.set_keep_above(True)
 
-                  self.window.set_modal(True)
+
+                  # -------------------------------------------------
+                  # Prevent normal closing
+                  # -------------------------------------------------
 
                   self.window.connect(
                       "delete-event",
@@ -294,36 +370,61 @@
 
 
                   # -------------------------------------------------
-                  # WebKit browser engine
-                  #
-                  # This is NOT Firefox.
-                  # The awareness page is embedded directly inside
-                  # this Linux application window.
+                  # Prevent resizing
                   # -------------------------------------------------
+
+                  self.window.set_resizable(False)
+
+
+                  # =================================================
+                  # WebKit browser engine
+                  # =================================================
 
                   self.webview = WebKit2.WebView()
 
-                  settings = self.webview.get_settings()
 
-                  settings.set_enable_javascript(True)
+                  self.webview.set_hexpand(True)
 
-                  settings.set_enable_plugins(False)
+                  self.webview.set_vexpand(True)
 
-                  settings.set_enable_webgl(True)
 
-                  settings.set_allow_file_access_from_file_urls(False)
+                  settings = (
+                      self.webview.get_settings()
+                  )
 
-                  settings.set_allow_universal_access_from_file_urls(False)
+
+                  settings.set_enable_javascript(
+                      True
+                  )
+
+
+                  settings.set_enable_webgl(
+                      True
+                  )
 
 
                   # -------------------------------------------------
-                  # Load awareness application
+                  # Load existing awareness page
                   # -------------------------------------------------
+
+                  log(
+                      "Loading awareness page."
+                  )
+
+                  log(
+                      "URL="
+                      + AWARENESS_URL
+                  )
+
 
                   self.webview.load_uri(
                       AWARENESS_URL
                   )
 
+
+                  # -------------------------------------------------
+                  # Add WebKit to window
+                  # -------------------------------------------------
 
                   self.window.add(
                       self.webview
@@ -331,20 +432,30 @@
 
 
                   # -------------------------------------------------
-                  # Show application
+                  # Show window
                   # -------------------------------------------------
 
                   self.window.show_all()
 
 
+                  # -------------------------------------------------
+                  # Make sure it is fullscreen
+                  # -------------------------------------------------
+
+                  self.window.fullscreen()
+
+
+                  self.window.present()
+
+
                   log(
-                      "Native Security Awareness window opened."
+                      "Native kiosk window opened."
                   )
 
 
-                  # -------------------------------------------------
-                  # Start backend polling
-                  # -------------------------------------------------
+                  # =================================================
+                  # Start status polling
+                  # =================================================
 
                   GLib.timeout_add_seconds(
                       POLL_INTERVAL,
@@ -353,7 +464,7 @@
 
 
               # =====================================================
-              # Prevent user from closing the awareness application
+              # Prevent closing
               # =====================================================
 
               def prevent_close(
@@ -363,7 +474,7 @@
               ):
 
                   log(
-                      "User attempted to close application."
+                      "Close attempt blocked."
                   )
 
                   return True
@@ -378,9 +489,9 @@
                   status = check_backend()
 
 
-                  # -----------------------------------------------
+                  # -------------------------------------------------
                   # Backend temporarily unavailable
-                  # -----------------------------------------------
+                  # -------------------------------------------------
 
                   if status is None:
 
@@ -389,15 +500,15 @@
                       )
 
                       log(
-                          "Keeping application open."
+                          "Keeping kiosk open."
                       )
 
                       return True
 
 
-                  # -----------------------------------------------
+                  # -------------------------------------------------
                   # Test completed
-                  # -----------------------------------------------
+                  # -------------------------------------------------
 
                   if status is True:
 
@@ -411,7 +522,9 @@
 
                       log(
                           "Keeping result visible for "
-                          + str(RESULT_DISPLAY_SECONDS)
+                          + str(
+                              RESULT_DISPLAY_SECONDS
+                          )
                           + " seconds."
                       )
 
@@ -420,9 +533,14 @@
                       )
 
 
-                      # Stop polling
+                      self.window.set_keep_above(
+                          True
+                      )
 
-                      self.show_completed_message()
+
+                      self.window.set_title(
+                          "Security Awareness Training - Completed"
+                      )
 
 
                       GLib.timeout_add_seconds(
@@ -434,9 +552,9 @@
                       return False
 
 
-                  # -----------------------------------------------
+                  # -------------------------------------------------
                   # Still pending
-                  # -----------------------------------------------
+                  # -------------------------------------------------
 
                   log(
                       "Security awareness still pending."
@@ -446,34 +564,22 @@
 
 
               # =====================================================
-              # Completion message
-              # =====================================================
-
-              def show_completed_message(self):
-
-                  log(
-                      "Completion detected."
-                  )
-
-                  # Do not replace the test page.
-                  # The score/result remains visible.
-
-                  self.window.set_title(
-                      "Security Awareness Training - Completed"
-                  )
-
-
-              # =====================================================
               # Close application
               # =====================================================
 
               def close_application(self):
 
                   log(
-                      "Closing Security Awareness application."
+                      "Closing Security Awareness kiosk."
                   )
 
-                  self.window.destroy()
+                  try:
+
+                      self.window.destroy()
+
+                  except Exception:
+                      pass
+
 
                   Gtk.main_quit()
 
@@ -481,7 +587,7 @@
 
 
           # =========================================================
-          # Start application
+          # Application startup
           # =========================================================
 
           try:
@@ -490,9 +596,11 @@
 
               Gtk.main()
 
+
           except SystemExit:
 
               raise
+
 
           except Exception as e:
 
@@ -504,11 +612,11 @@
               sys.exit(0)
 
 
-    # ---------------------------------------------------------
-    # 5. Create system-wide autostart
-    # ---------------------------------------------------------
+    # =========================================================
+    # 7. Create system-wide autostart
+    # =========================================================
 
-    - name: Create system-wide Security Awareness autostart
+    - name: Create Security Awareness system-wide autostart
       ansible.builtin.copy:
         dest: "{{ desktop_file }}"
         owner: root
@@ -520,104 +628,102 @@
           Type=Application
           Name=Security Awareness Training
           Comment=Security Awareness Mock Test
+
           Exec=/usr/bin/python3 /opt/security-awareness/security-awareness-app.py
+
           Terminal=false
-          StartupNotify=true
+          StartupNotify=false
 
           X-GNOME-Autostart-enabled=true
           X-Cinnamon-Autostart-enabled=true
           X-XFCE-Autostart-enabled=true
 
 
-    # ---------------------------------------------------------
-    # 6. Remove previous per-user autostart
-    # ---------------------------------------------------------
+    # =========================================================
+    # 8. Verify application
+    # =========================================================
 
-    - name: Remove old per-user Security Awareness autostart
-      ansible.builtin.shell: |
-        for home_dir in /home/*; do
-          if [ -d "$home_dir/.config/autostart" ]; then
-            rm -f "$home_dir/.config/autostart/security-awareness-kiosk.desktop"
-          fi
-        done
-      args:
-        executable: /bin/bash
-      changed_when: false
-
-
-    # ---------------------------------------------------------
-    # 7. Remove old automatic login configuration
-    # ---------------------------------------------------------
-
-    - name: Remove Security Awareness automatic login configuration
-      ansible.builtin.file:
-        path: /etc/lightdm/lightdm.conf.d/90-security-awareness-autologin.conf
-        state: absent
-
-
-    # ---------------------------------------------------------
-    # 8. Verify Python application
-    # ---------------------------------------------------------
-
-    - name: Verify native application exists
+    - name: Verify native application
       ansible.builtin.stat:
         path: "{{ app_path }}"
       register: app_stat
 
 
-    # ---------------------------------------------------------
+    # =========================================================
     # 9. Verify autostart
-    # ---------------------------------------------------------
+    # =========================================================
 
-    - name: Verify system autostart exists
+    - name: Verify system-wide autostart
       ansible.builtin.stat:
         path: "{{ desktop_file }}"
       register: desktop_stat
 
 
-    # ---------------------------------------------------------
-    # 10. Verify GTK/WebKit
-    # ---------------------------------------------------------
+    # =========================================================
+    # 10. Verify GTK
+    # =========================================================
 
-    - name: Verify GTK Python support
+    - name: Verify GTK support
       ansible.builtin.command:
-        cmd: python3 -c "import gi; gi.require_version('Gtk','3.0'); from gi.repository import Gtk"
+        cmd: >
+          python3 -c
+          "import gi;
+          gi.require_version('Gtk','3.0');
+          from gi.repository import Gtk;
+          print('GTK OK')"
       register: gtk_check
       changed_when: false
       failed_when: false
 
 
-    - name: Verify WebKit Python support
+    # =========================================================
+    # 11. Verify WebKit
+    # =========================================================
+
+    - name: Verify WebKit support
       ansible.builtin.command:
-        cmd: python3 -c "import gi; gi.require_version('WebKit2','4.1'); from gi.repository import WebKit2"
+        cmd: >
+          python3 -c
+          "import gi;
+          gi.require_version('WebKit2','4.1');
+          from gi.repository import WebKit2;
+          print('WebKit OK')"
       register: webkit_check
       changed_when: false
       failed_when: false
 
 
-    # ---------------------------------------------------------
-    # 11. Deployment result
-    # ---------------------------------------------------------
+    # =========================================================
+    # 12. Deployment summary
+    # =========================================================
 
     - name: Show deployment result
       ansible.builtin.debug:
         msg:
           - "=================================================="
-          - "Security Awareness Native Application Deployed"
+          - "Security Awareness Native Kiosk Deployment"
           - "=================================================="
           - "Application: {{ app_path }}"
           - "Application exists: {{ app_stat.stat.exists }}"
           - "Autostart: {{ desktop_file }}"
           - "Autostart exists: {{ desktop_stat.stat.exists }}"
-          - "GTK support: {{ 'OK' if gtk_check.rc == 0 else 'FAILED' }}"
-          - "WebKit support: {{ 'OK' if webkit_check.rc == 0 else 'FAILED' }}"
+          - "GTK: {{ 'OK' if gtk_check.rc == 0 else 'FAILED' }}"
+          - "WebKit: {{ 'OK' if webkit_check.rc == 0 else 'FAILED' }}"
           - "Backend: {{ backend_base }}"
           - "Awareness page: {{ awareness_page }}"
-          - "Desktop support: XFCE + Cinnamon"
-          - "Applies to: ALL GUI USERS"
+          - "Hostname: automatically detected"
+          - "Desktop: XFCE + Cinnamon"
+          - "Users: ALL GUI USERS"
           - "Firefox: NOT USED"
-          - "Automatic login: DISABLED"
-          - "Backend unavailable initially: FAIL OPEN"
-          - "Status polling: Every 2 seconds"
+          - "Window mode: FULL SCREEN KIOSK"
+          - "Title bar: DISABLED"
+          - "Minimize: DISABLED"
+          - "Maximize: DISABLED"
+          - "Close button: DISABLED"
+          - "Window close attempt: BLOCKED"
+          - "Always on top: ENABLED"
+          - "Status polling: 2 seconds"
           - "Result display: 8 seconds"
+          - "Automatic login: DISABLED"
+          - "Backend unavailable: FAIL OPEN"
           - "=================================================="
