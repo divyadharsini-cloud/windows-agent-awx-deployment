@@ -19,6 +19,7 @@
     # =========================================================
     # 1. Create application directory
     # =========================================================
+
     - name: Create Security Awareness directory
       ansible.builtin.raw: |
         powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ^
@@ -27,375 +28,348 @@
 
 
     # =========================================================
-    # 2. Create Windows PowerShell kiosk launcher
+    # 2. Create kiosk launcher
     # =========================================================
-    - name: Create kiosk launcher
-      ansible.builtin.raw: |
-        powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ^
-        "$content = @'
-        `$ErrorActionPreference = 'Continue'
 
-        `$LogFile = '{{ log_path }}'
-        `$Backend = '{{ backend_url }}'
-        `$AwarenessPage = '{{ awareness_page }}'
+    - name: Create Windows kiosk launcher
+      ansible.windows.win_copy:
+        dest: "{{ launcher_path }}"
+        content: |
+          $ErrorActionPreference = 'Continue'
 
-        function Write-Log {
-            param([string]`$Message)
+          $LogFile = '{{ log_path }}'
+          $Backend = '{{ backend_url }}'
+          $AwarenessPage = '{{ awareness_page }}'
 
-            `$timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+          function Write-Log {
+              param([string]$Message)
 
-            Add-Content -Path `$LogFile `
-                -Value "`$timestamp `$Message"
-        }
+              $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
 
-        Write-Log '=============================================='
-        Write-Log 'Security Awareness Kiosk launcher started'
-        Write-Log "USER=`$env:USERNAME"
-        Write-Log "COMPUTER=`$env:COMPUTERNAME"
-        Write-Log '=============================================='
+              Add-Content -Path $LogFile `
+                  -Value "$timestamp $Message"
+          }
 
+          Write-Log '=============================================='
+          Write-Log 'Security Awareness Kiosk launcher started'
+          Write-Log "USER=$env:USERNAME"
+          Write-Log "COMPUTER=$env:COMPUTERNAME"
+          Write-Log '=============================================='
 
-        # =====================================================
-        # Wait for interactive Windows desktop
-        # =====================================================
 
-        Write-Log 'Waiting for explorer.exe...'
+          # =====================================================
+          # Wait for interactive Windows desktop
+          # =====================================================
 
-        `$timeout = 120
-        `$elapsed = 0
+          Write-Log 'Waiting for explorer.exe...'
 
-        while (-not (Get-Process explorer -ErrorAction SilentlyContinue)) {
+          $timeout = 120
+          $elapsed = 0
 
-            Start-Sleep -Seconds 2
+          while (-not (Get-Process explorer -ErrorAction SilentlyContinue)) {
 
-            `$elapsed += 2
+              Start-Sleep -Seconds 2
 
-            if (`$elapsed -ge `$timeout) {
-                Write-Log 'explorer.exe did not start within timeout'
-                exit 0
-            }
-        }
+              $elapsed += 2
 
-        Write-Log 'explorer.exe detected'
-        Write-Log 'Interactive user session is available'
+              if ($elapsed -ge $timeout) {
+                  Write-Log 'explorer.exe did not start within timeout'
+                  exit 0
+              }
+          }
 
+          Write-Log 'explorer.exe detected'
+          Write-Log 'Interactive user session is available'
 
-        # =====================================================
-        # Get hostname
-        # =====================================================
 
-        `$hostname = `$env:COMPUTERNAME
+          # =====================================================
+          # Get hostname
+          # =====================================================
 
-        Write-Log "Hostname=`$hostname"
+          $hostname = $env:COMPUTERNAME
 
+          Write-Log "Hostname=$hostname"
 
-        # =====================================================
-        # Backend status URL
-        # =====================================================
 
-        `$statusUrl = "`$Backend/status?hostname=`$hostname"
+          # =====================================================
+          # Backend status URL
+          # =====================================================
 
-        Write-Log "Checking backend: `$statusUrl"
+          $statusUrl = "$Backend/status?hostname=$hostname"
 
+          Write-Log "Checking backend: $statusUrl"
 
-        # =====================================================
-        # Initial backend check
-        # =====================================================
 
-        try {
+          # =====================================================
+          # Initial backend check
+          # =====================================================
 
-            `$response = Invoke-RestMethod `
-                -Uri `$statusUrl `
-                -Method Get `
-                -TimeoutSec 10
+          try {
 
-            Write-Log 'Backend response received'
+              $response = Invoke-RestMethod `
+                  -Uri $statusUrl `
+                  -Method Get `
+                  -TimeoutSec 2
 
-        }
-        catch {
+              Write-Log 'Backend response received'
 
-            Write-Log "Backend unavailable: `$(`$_.Exception.Message)"
-            Write-Log 'Failing open - kiosk will not start'
-            exit 0
-        }
+          }
+          catch {
 
+              Write-Log "Backend unavailable: $($_.Exception.Message)"
+              Write-Log 'Failing open - kiosk will not start'
 
-        # =====================================================
-        # Check completion status
-        # =====================================================
+              exit 0
+          }
 
-        if (`$response.completed -eq `$true) {
 
-            Write-Log 'Awareness already completed'
-            Write-Log 'No kiosk required'
+          # =====================================================
+          # Check completion status
+          # =====================================================
 
-            exit 0
-        }
+          if ($response.completed -eq $true) {
 
+              Write-Log 'Awareness already completed'
+              Write-Log 'No kiosk required'
 
-        Write-Log 'Awareness NOT completed'
-        Write-Log 'Kiosk is required'
+              exit 0
+          }
 
 
-        # =====================================================
-        # Locate Google Chrome
-        # =====================================================
+          Write-Log 'Awareness NOT completed'
+          Write-Log 'Kiosk is required'
 
-        `$ChromePaths = @(
-            'C:\Program Files\Google\Chrome\Application\chrome.exe',
-            'C:\Program Files (x86)\Google\Chrome\Application\chrome.exe'
-        )
 
-        `$Chrome = `$null
+          # =====================================================
+          # Locate Google Chrome
+          # =====================================================
 
-        foreach (`$path in `$ChromePaths) {
+          $ChromePaths = @(
+              'C:\Program Files\Google\Chrome\Application\chrome.exe',
+              'C:\Program Files (x86)\Google\Chrome\Application\chrome.exe'
+          )
 
-            if (Test-Path `$path) {
+          $Chrome = $null
 
-                `$Chrome = `$path
-                break
-            }
-        }
+          foreach ($path in $ChromePaths) {
 
+              if (Test-Path $path) {
 
-        if (-not `$Chrome) {
+                  $Chrome = $path
+                  break
+              }
+          }
 
-            Write-Log 'Google Chrome was not found'
-            Write-Log 'Exiting kiosk launcher'
 
-            exit 0
-        }
+          if (-not $Chrome) {
 
+              Write-Log 'Google Chrome was not found'
+              Write-Log 'Exiting kiosk launcher'
 
-        Write-Log "Chrome found: `$Chrome"
+              exit 0
+          }
 
 
-        # =====================================================
-        # Build awareness URL
-        # =====================================================
+          Write-Log "Chrome found: $Chrome"
 
-        `$KioskUrl = "`$AwarenessPage?host=`$hostname"
 
-        Write-Log "Kiosk URL: `$KioskUrl"
+          # =====================================================
+          # Build awareness URL
+          # =====================================================
 
+          $KioskUrl = "$AwarenessPage?host=$hostname"
 
-        # =====================================================
-        # Chrome kiosk arguments
-        # =====================================================
+          Write-Log "Kiosk URL: $KioskUrl"
 
-        `$ChromeArguments = @(
-            '--kiosk',
-            '--incognito',
-            '--noerrdialogs',
-            '--disable-session-crashed-bubble',
-            '--disable-infobars',
-            '--disable-pinch',
-            '--overscroll-history-navigation=0',
-            "`$KioskUrl"
-        )
 
+          # =====================================================
+          # Chrome arguments
+          # =====================================================
 
-        # =====================================================
-        # Start Chrome kiosk
-        # =====================================================
+          $ChromeArguments = @(
+              '--kiosk',
+              '--incognito',
+              '--noerrdialogs',
+              '--disable-session-crashed-bubble',
+              '--disable-infobars',
+              '--disable-pinch',
+              '--overscroll-history-navigation=0',
+              "$KioskUrl"
+          )
 
-        Write-Log 'Starting Chrome kiosk'
 
-        Start-Process `
-            -FilePath `$Chrome `
-            -ArgumentList `$ChromeArguments
+          # =====================================================
+          # Start Chrome kiosk
+          # =====================================================
 
-        Write-Log 'Chrome kiosk started'
+          Write-Log 'Starting Chrome kiosk'
 
+          Start-Process `
+              -FilePath $Chrome `
+              -ArgumentList $ChromeArguments
 
-        # =====================================================
-        # Monitor awareness completion
-        # =====================================================
+          Write-Log 'Chrome kiosk started'
 
-        while (`$true) {
 
-            Start-Sleep -Seconds 2
+          # =====================================================
+          # Monitor awareness completion
+          # =====================================================
 
+          while ($true) {
 
-            # -------------------------------------------------
-            # Check whether Chrome is still running
-            # -------------------------------------------------
+              Start-Sleep -Seconds 2
 
-            `$ChromeProcess = Get-Process chrome -ErrorAction SilentlyContinue
 
-            if (-not `$ChromeProcess) {
+              # -------------------------------------------------
+              # Check whether Chrome is still running
+              # -------------------------------------------------
 
-                Write-Log 'Chrome was closed'
+              $ChromeProcess = Get-Process chrome -ErrorAction SilentlyContinue
 
+              if (-not $ChromeProcess) {
 
-                # -------------------------------------------------
-                # Check backend before relaunching
-                # -------------------------------------------------
+                  Write-Log 'Chrome was closed'
 
-                try {
 
-                    `$response = Invoke-RestMethod `
-                        -Uri `$statusUrl `
-                        -Method Get `
-                        -TimeoutSec 2
+                  # -------------------------------------------------
+                  # Check backend before relaunching
+                  # -------------------------------------------------
 
-                }
-                catch {
+                  try {
 
-                    Write-Log 'Backend unavailable after Chrome closed'
-                    Write-Log 'Exiting launcher'
+                      $response = Invoke-RestMethod `
+                          -Uri $statusUrl `
+                          -Method Get `
+                          -TimeoutSec 2
 
-                    exit 0
-                }
+                  }
+                  catch {
 
+                      Write-Log 'Backend unavailable after Chrome closed'
+                      Write-Log 'Exiting launcher'
 
-                if (`$response.completed -eq `$true) {
+                      exit 0
+                  }
 
-                    Write-Log 'Awareness completed'
-                    Write-Log 'No relaunch required'
 
-                    exit 0
-                }
+                  if ($response.completed -eq $true) {
 
+                      Write-Log 'Awareness completed'
+                      Write-Log 'No relaunch required'
 
-                Write-Log 'Awareness still not completed'
-                Write-Log 'Relaunching Chrome kiosk'
+                      exit 0
+                  }
 
 
-                Start-Process `
-                    -FilePath `$Chrome `
-                    -ArgumentList `$ChromeArguments
+                  Write-Log 'Awareness still not completed'
+                  Write-Log 'Relaunching Chrome kiosk'
 
-                Write-Log 'Chrome kiosk relaunched'
 
-                continue
-            }
+                  Start-Process `
+                      -FilePath $Chrome `
+                      -ArgumentList $ChromeArguments
 
+                  Write-Log 'Chrome kiosk relaunched'
 
-            # -------------------------------------------------
-            # Check backend completion
-            # -------------------------------------------------
+                  continue
+              }
 
-            try {
 
-                `$response = Invoke-RestMethod `
-                    -Uri `$statusUrl `
-                    -Method Get `
-                    -TimeoutSec 2
+              # -------------------------------------------------
+              # Check backend completion
+              # -------------------------------------------------
 
+              try {
 
-                if (`$response.completed -eq `$true) {
+                  $response = Invoke-RestMethod `
+                      -Uri $statusUrl `
+                      -Method Get `
+                      -TimeoutSec 2
 
-                    Write-Log '=============================================='
-                    Write-Log 'Awareness completed'
-                    Write-Log 'Keeping result visible for 8 seconds'
-                    Write-Log '=============================================='
 
+                  if ($response.completed -eq $true) {
 
-                    Start-Sleep -Seconds 8
+                      Write-Log '=============================================='
+                      Write-Log 'Awareness completed'
+                      Write-Log 'Keeping result visible for 8 seconds'
+                      Write-Log '=============================================='
 
 
-                    # -------------------------------------------------
-                    # Close Chrome
-                    # -------------------------------------------------
+                      Start-Sleep -Seconds 8
 
-                    Write-Log 'Closing Chrome kiosk'
 
+                      # -------------------------------------------------
+                      # Close Chrome
+                      # -------------------------------------------------
 
-                    Get-Process chrome -ErrorAction SilentlyContinue |
-                        Stop-Process -Force
+                      Write-Log 'Closing Chrome kiosk'
 
+                      Get-Process chrome -ErrorAction SilentlyContinue |
+                          Stop-Process -Force
 
-                    Write-Log 'Chrome closed'
-                    Write-Log 'Security Awareness completed'
+                      Write-Log 'Chrome closed'
+                      Write-Log 'Security Awareness completed'
 
-                    exit 0
-                }
+                      exit 0
+                  }
 
-            }
-            catch {
+              }
+              catch {
 
-                Write-Log "Backend check failed: `$(`$_.Exception.Message)"
+                  Write-Log "Backend check failed: $($_.Exception.Message)"
 
-                # -------------------------------------------------
-                # Temporary backend failure
-                #
-                # Keep Chrome open.
-                # Do not close the kiosk.
-                # -------------------------------------------------
-
-                continue
-            }
-        }
-
-        '@
-
-        [System.IO.File]::WriteAllText(
-            '{{ launcher_path }}',
-            `$content,
-            [System.Text.Encoding]::UTF8
-        )"
-
-      changed_when: true
+                  # Keep kiosk open during temporary backend failure.
+                  continue
+              }
+          }
 
 
     # =========================================================
     # 3. Create scheduled-task registration script
     # =========================================================
+
     - name: Create scheduled task script
-      ansible.builtin.raw: |
-        powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ^
-        "$content = @'
-        `$TaskName = '{{ scheduled_task_name }}'
-        `$Launcher = '{{ launcher_path }}'
+      ansible.windows.win_copy:
+        dest: "{{ task_script_path }}"
+        content: |
+          $TaskName = '{{ scheduled_task_name }}'
+          $Launcher = '{{ launcher_path }}'
 
-        Write-Host 'Creating Security Awareness scheduled task...'
-
-
-        # =====================================================
-        # Remove existing task
-        # =====================================================
-
-        schtasks.exe /Delete `
-            /TN "`$TaskName" `
-            /F 2>`$null
+          Write-Host 'Creating Security Awareness scheduled task...'
 
 
-        # =====================================================
-        # Create ONLOGON task
-        #
-        # The task starts after the Windows user logs in.
-        # Chrome requires an interactive desktop session.
-        # =====================================================
+          # Remove existing task
 
-        `$taskCommand = `
-            "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"`$Launcher`""
-
-        schtasks.exe /Create `
-            /TN "`$TaskName" `
-            /TR "`$taskCommand" `
-            /SC ONLOGON `
-            /RU "`$env:USERNAME" `
-            /RL LIMITED `
-            /F
+          schtasks.exe /Delete `
+              /TN "$TaskName" `
+              /F 2>$null
 
 
-        Write-Host 'Security Awareness scheduled task created successfully.'
+          # =====================================================
+          # ONLOGON
+          #
+          # Task starts when the Windows user logs in.
+          # =====================================================
 
-        '@
+          $taskCommand = `
+              "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$Launcher`""
 
-        [System.IO.File]::WriteAllText(
-            '{{ task_script_path }}',
-            `$content,
-            [System.Text.Encoding]::UTF8
-        )"
+          schtasks.exe /Create `
+              /TN "$TaskName" `
+              /TR "$taskCommand" `
+              /SC ONLOGON `
+              /RU "$env:USERNAME" `
+              /RL LIMITED `
+              /F
 
-      changed_when: true
+
+          Write-Host 'Security Awareness scheduled task created successfully.'
 
 
     # =========================================================
     # 4. Register scheduled task
     # =========================================================
+
     - name: Register Security Awareness logon task
       ansible.builtin.raw: |
         powershell.exe -NoProfile -ExecutionPolicy Bypass -File "{{ task_script_path }}"
@@ -403,8 +377,9 @@
 
 
     # =========================================================
-    # 5. Verify launcher exists
+    # 5. Verify launcher
     # =========================================================
+
     - name: Verify kiosk launcher
       ansible.builtin.raw: |
         powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ^
@@ -421,6 +396,7 @@
     # =========================================================
     # 6. Verify scheduled task
     # =========================================================
+
     - name: Verify scheduled task
       ansible.builtin.raw: |
         schtasks.exe /Query /TN "{{ scheduled_task_name }}" /V /FO LIST
@@ -430,6 +406,7 @@
     # =========================================================
     # 7. Final verification
     # =========================================================
+
     - name: Deployment summary
       ansible.builtin.raw: |
         powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ^
