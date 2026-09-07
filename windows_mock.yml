@@ -1,6 +1,6 @@
 ---
 - name: Fix Security Awareness Windows Kiosk Launcher
-  hosts: ansibletesting
+  hosts: LMDULB3FAIT0019
   gather_facts: false
 
   vars:
