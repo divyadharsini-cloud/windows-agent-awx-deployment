@@ -1,43 +1,17 @@
 ---
-- name: Configure Security Awareness Kiosk for All Linux GUI Users
+- name: Configure Security Awareness Kiosk for all Linux GUI users
   hosts: ansibletesting
   become: true
   gather_facts: true
 
   vars:
-    kiosk_dir: "/opt/security-awareness"
-    launcher_path: "/opt/security-awareness/kiosk-launcher-linux.sh"
-
-    autostart_dir: "/etc/xdg/autostart"
-    autostart_file: "/etc/xdg/autostart/security-awareness-kiosk.desktop"
-
+    kiosk_dir: /opt/security-awareness
+    launcher_path: /opt/security-awareness/kiosk-launcher-linux.sh
+    desktop_file: /etc/xdg/autostart/security-awareness-kiosk.desktop
     backend_base: "http://172.17.6.142:5000/api/awareness"
-    awareness_url: "http://172.17.6.142:5000/awareness.html"
+    awareness_page: "http://172.17.6.142:5000/awareness.html"
 
   tasks:
-
-    # =========================================================
-    # 1. Remove previous user-specific/systemd configuration
-    # =========================================================
-
-    - name: Remove old systemd user kiosk service
-      ansible.builtin.file:
-        path: /etc/systemd/user/security-awareness-kiosk.service
-        state: absent
-
-    - name: Remove old systemd system kiosk service
-      ansible.builtin.file:
-        path: /etc/systemd/system/security-awareness-kiosk.service
-        state: absent
-
-    - name: Remove old LightDM automatic login configuration
-      ansible.builtin.file:
-        path: /etc/lightdm/lightdm.conf.d/90-security-awareness-autologin.conf
-        state: absent
-
-    # =========================================================
-    # 2. Create system-wide kiosk directory
-    # =========================================================
 
     - name: Create kiosk directory
       ansible.builtin.file:
@@ -47,11 +21,12 @@
         group: root
         mode: "0755"
 
-    # =========================================================
-    # 3. Create launcher
-    # =========================================================
+    - name: Remove previous user-specific LightDM autologin configuration
+      ansible.builtin.file:
+        path: /etc/lightdm/lightdm.conf.d/90-security-awareness-autologin.conf
+        state: absent
 
-    - name: Create Security Awareness launcher
+    - name: Create security awareness launcher
       ansible.builtin.copy:
         dest: "{{ launcher_path }}"
         owner: root
@@ -60,204 +35,233 @@
         content: |
           #!/bin/bash
 
-          LOG="/tmp/security-awareness-kiosk-${USER}.log"
+          BACKEND_BASE="{{ backend_base }}"
+          AWARENESS_PAGE="{{ awareness_page }}"
 
-          echo "========================================" >> "$LOG"
-          echo "$(date) : Security Awareness launcher started" >> "$LOG"
-          echo "$(date) : USER=$USER" >> "$LOG"
-          echo "$(date) : HOME=$HOME" >> "$LOG"
-          echo "$(date) : DISPLAY=$DISPLAY" >> "$LOG"
-          echo "$(date) : XDG_CURRENT_DESKTOP=$XDG_CURRENT_DESKTOP" >> "$LOG"
-          echo "$(date) : XDG_SESSION_DESKTOP=$XDG_SESSION_DESKTOP" >> "$LOG"
+          LOG="/tmp/security-awareness-kiosk-${UID}.log"
 
-          # =================================================
-          # Wait for graphical display
-          # =================================================
+          log()
+          {
+              echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOG"
+          }
 
-          for i in {1..30}; do
+          log "Security Awareness kiosk launcher started"
 
-              if [ -n "$DISPLAY" ]; then
-                  echo "$(date) : Graphical display available: $DISPLAY" >> "$LOG"
-                  break
-              fi
+          # ---------------------------------------------------------
+          # Find the graphical desktop session belonging to this user
+          # ---------------------------------------------------------
 
-              echo "$(date) : Waiting for graphical display..." >> "$LOG"
-              sleep 2
+          DISPLAY_FOUND=""
+          XAUTHORITY_FOUND=""
+
+          SESSION_PROCS="xfce4-session cinnamon-session gnome-session mate-session"
+
+          for PROC_NAME in $SESSION_PROCS; do
+
+              for PID in $(pgrep -u "$UID" -x "$PROC_NAME" 2>/dev/null); do
+
+                  if [ -r "/proc/$PID/environ" ]; then
+
+                      PROC_DISPLAY=$(tr '\0' '\n' < "/proc/$PID/environ" 2>/dev/null \
+                          | sed -n 's/^DISPLAY=//p' \
+                          | head -n 1)
+
+                      PROC_XAUTHORITY=$(tr '\0' '\n' < "/proc/$PID/environ" 2>/dev/null \
+                          | sed -n 's/^XAUTHORITY=//p' \
+                          | head -n 1)
+
+                      if [ -n "$PROC_DISPLAY" ]; then
+                          DISPLAY_FOUND="$PROC_DISPLAY"
+                          XAUTHORITY_FOUND="$PROC_XAUTHORITY"
+                          break 2
+                      fi
+
+                  fi
+
+              done
 
           done
 
-          if [ -z "$DISPLAY" ]; then
-              echo "$(date) : No graphical display found. Exiting." >> "$LOG"
+          # ---------------------------------------------------------
+          # Fallback to current environment
+          # ---------------------------------------------------------
+
+          if [ -z "$DISPLAY_FOUND" ] && [ -n "$DISPLAY" ]; then
+              DISPLAY_FOUND="$DISPLAY"
+          fi
+
+          if [ -z "$XAUTHORITY_FOUND" ] && [ -n "$XAUTHORITY" ]; then
+              XAUTHORITY_FOUND="$XAUTHORITY"
+          fi
+
+          # ---------------------------------------------------------
+          # Final XAUTHORITY fallback
+          # ---------------------------------------------------------
+
+          if [ -z "$XAUTHORITY_FOUND" ]; then
+              XAUTHORITY_FOUND="$HOME/.Xauthority"
+          fi
+
+          if [ -z "$DISPLAY_FOUND" ]; then
+              log "No graphical DISPLAY found. Exiting."
               exit 0
           fi
 
-          # =================================================
-          # Allow Cinnamon/XFCE desktop to finish starting
-          # =================================================
+          export DISPLAY="$DISPLAY_FOUND"
+          export XAUTHORITY="$XAUTHORITY_FOUND"
 
-          sleep 15
+          log "Using DISPLAY=$DISPLAY"
+          log "Using XAUTHORITY=$XAUTHORITY"
 
-          # =================================================
-          # Get hostname
-          # =================================================
+          # ---------------------------------------------------------
+          # Make sure curl exists
+          # ---------------------------------------------------------
 
-          HOSTNAME=$(hostname)
+          if ! command -v curl >/dev/null 2>&1; then
+              log "curl not installed. Exiting."
+              exit 0
+          fi
 
-          STATUS_URL="{{ backend_base }}/status?hostname=${HOSTNAME}"
-          AWARENESS_URL="{{ awareness_url }}?host=${HOSTNAME}"
+          # ---------------------------------------------------------
+          # Identify hostname
+          # ---------------------------------------------------------
 
-          echo "$(date) : Hostname=$HOSTNAME" >> "$LOG"
-          echo "$(date) : Status URL=$STATUS_URL" >> "$LOG"
-          echo "$(date) : Awareness URL=$AWARENESS_URL" >> "$LOG"
+          HOSTNAME_VALUE="$(hostname)"
 
-          # =================================================
-          # Check backend
-          # =================================================
+          STATUS_URL="${BACKEND_BASE}/status?hostname=${HOSTNAME_VALUE}"
 
-          RESPONSE=$(curl -s \
+          log "Checking completion status"
+          log "STATUS_URL=$STATUS_URL"
+
+          # ---------------------------------------------------------
+          # Initial status check
+          #
+          # If backend cannot be reached, fail open.
+          # The user is NOT locked out.
+          # ---------------------------------------------------------
+
+          STATUS_RESPONSE=$(curl \
+              --silent \
+              --show-error \
               --connect-timeout 2 \
               --max-time 2 \
-              "$STATUS_URL")
+              "$STATUS_URL" 2>/dev/null)
 
           CURL_RESULT=$?
 
-          echo "$(date) : API response=$RESPONSE" >> "$LOG"
-          echo "$(date) : curl result=$CURL_RESULT" >> "$LOG"
-
-          # =================================================
-          # Backend unavailable
-          # Fail open
-          # =================================================
-
-          if [ "$CURL_RESULT" -ne 0 ] || [ -z "$RESPONSE" ]; then
-              echo "$(date) : Backend unavailable. Exiting." >> "$LOG"
+          if [ "$CURL_RESULT" -ne 0 ]; then
+              log "Backend unavailable. Exiting without launching kiosk."
               exit 0
           fi
 
-          # =================================================
-          # Awareness already completed
-          # =================================================
+          log "Backend response: $STATUS_RESPONSE"
 
-          if echo "$RESPONSE" | grep -Eq '"completed"[[:space:]]*:[[:space:]]*true'; then
-              echo "$(date) : Awareness already completed. Nothing to do." >> "$LOG"
+          # ---------------------------------------------------------
+          # If already completed, do nothing
+          # ---------------------------------------------------------
+
+          if echo "$STATUS_RESPONSE" | grep -q '"completed"[[:space:]]*:[[:space:]]*true'; then
+              log "Security awareness already completed."
+              log "Firefox will NOT be launched."
               exit 0
           fi
 
-          # =================================================
-          # Find Firefox
-          # =================================================
+          # ---------------------------------------------------------
+          # Check Firefox
+          # ---------------------------------------------------------
 
-          FIREFOX=""
-
-          if [ -x "/usr/bin/firefox" ]; then
-              FIREFOX="/usr/bin/firefox"
-          elif [ -x "/snap/bin/firefox" ]; then
-              FIREFOX="/snap/bin/firefox"
-          elif command -v firefox >/dev/null 2>&1; then
-              FIREFOX=$(command -v firefox)
-          fi
+          FIREFOX="$(command -v firefox 2>/dev/null)"
 
           if [ -z "$FIREFOX" ]; then
-              echo "$(date) : Firefox not found." >> "$LOG"
+              log "Firefox not installed. Exiting."
               exit 0
           fi
 
-          echo "$(date) : Firefox=$FIREFOX" >> "$LOG"
+          # ---------------------------------------------------------
+          # Dedicated Firefox profile
+          # This does not modify the user's normal Firefox profile.
+          # ---------------------------------------------------------
 
-          # =================================================
-          # Create a separate Firefox profile
-          # This does NOT affect the user's normal Firefox
-          # =================================================
+          PROFILE_DIR="$HOME/.security-awareness-firefox"
 
-          PROFILE="$HOME/.security-awareness-firefox"
+          mkdir -p "$PROFILE_DIR"
 
-          mkdir -p "$PROFILE"
+          # ---------------------------------------------------------
+          # Launch kiosk
+          # ---------------------------------------------------------
 
-          echo "$(date) : Firefox profile=$PROFILE" >> "$LOG"
+          KIOSK_URL="${AWARENESS_PAGE}?host=${HOSTNAME_VALUE}"
 
-          # =================================================
-          # Launch Firefox kiosk
-          # =================================================
-
-          echo "$(date) : Launching Security Awareness kiosk..." >> "$LOG"
+          log "Launching Firefox kiosk"
+          log "URL=$KIOSK_URL"
 
           "$FIREFOX" \
               --no-remote \
               --new-instance \
-              --profile "$PROFILE" \
+              --profile "$PROFILE_DIR" \
               --kiosk \
-              "$AWARENESS_URL" \
-              >> "$LOG" 2>&1 &
+              "$KIOSK_URL" >/dev/null 2>&1 &
 
           FIREFOX_PID=$!
 
-          echo "$(date) : Firefox PID=$FIREFOX_PID" >> "$LOG"
+          log "Firefox PID=$FIREFOX_PID"
 
-          # =================================================
-          # Monitor completion
-          # =================================================
+          # ---------------------------------------------------------
+          # Poll backend every 2 seconds
+          # ---------------------------------------------------------
 
-          while true; do
+          while kill -0 "$FIREFOX_PID" 2>/dev/null; do
 
               sleep 2
 
-              # Firefox was closed manually
-              if ! kill -0 "$FIREFOX_PID" 2>/dev/null; then
-                  echo "$(date) : Kiosk Firefox exited." >> "$LOG"
-                  break
-              fi
-
-              RESPONSE=$(curl -s \
+              STATUS_RESPONSE=$(curl \
+                  --silent \
+                  --show-error \
                   --connect-timeout 2 \
                   --max-time 2 \
-                  "$STATUS_URL")
+                  "$STATUS_URL" 2>/dev/null)
 
-              echo "$(date) : Poll response=$RESPONSE" >> "$LOG"
+              CURL_RESULT=$?
 
-              if echo "$RESPONSE" | grep -Eq '"completed"[[:space:]]*:[[:space:]]*true'; then
+              if [ "$CURL_RESULT" -ne 0 ]; then
+                  log "Backend temporarily unavailable. Continuing."
+                  continue
+              fi
 
-                  echo "$(date) : Awareness test completed." >> "$LOG"
+              log "Status: $STATUS_RESPONSE"
 
-                  # Keep score/result visible for 8 seconds
+              if echo "$STATUS_RESPONSE" | grep -q '"completed"[[:space:]]*:[[:space:]]*true'; then
+
+                  log "Security awareness completed."
+                  log "Keeping result visible for 8 seconds."
+
                   sleep 8
 
-                  echo "$(date) : Closing kiosk Firefox." >> "$LOG"
+                  # -------------------------------------------------
+                  # Close ONLY this kiosk Firefox process
+                  # -------------------------------------------------
 
-                  # Close only this dedicated kiosk profile
-                  pkill -TERM -f "$PROFILE" 2>/dev/null || true
+                  if kill -0 "$FIREFOX_PID" 2>/dev/null; then
+                      kill "$FIREFOX_PID" 2>/dev/null
+                      sleep 2
+                  fi
 
-                  sleep 3
+                  if kill -0 "$FIREFOX_PID" 2>/dev/null; then
+                      kill -9 "$FIREFOX_PID" 2>/dev/null
+                  fi
 
-                  pkill -KILL -f "$PROFILE" 2>/dev/null || true
-
-                  echo "$(date) : Kiosk Firefox closed." >> "$LOG"
-
-                  break
+                  log "Kiosk Firefox closed."
+                  exit 0
               fi
 
           done
 
-          echo "$(date) : Security Awareness launcher finished." >> "$LOG"
+          log "Kiosk Firefox exited."
+          exit 0
 
-    # =========================================================
-    # 4. Create system-wide XDG autostart directory
-    # =========================================================
-
-    - name: Create XDG autostart directory
-      ansible.builtin.file:
-        path: "{{ autostart_dir }}"
-        state: directory
-        owner: root
-        group: root
-        mode: "0755"
-
-    # =========================================================
-    # 5. Create system-wide autostart entry
-    # =========================================================
-
-    - name: Create system-wide Security Awareness autostart
+    - name: Create system-wide XDG autostart entry
       ansible.builtin.copy:
-        dest: "{{ autostart_file }}"
+        dest: "{{ desktop_file }}"
         owner: root
         group: root
         mode: "0644"
@@ -273,53 +277,33 @@
           X-Cinnamon-Autostart-enabled=true
           X-XFCE-Autostart-enabled=true
 
-    # =========================================================
-    # 6. Verify Cinnamon/XFCE compatible configuration
-    # =========================================================
-
-    - name: Detect installed desktop environments
+    - name: Remove old per-user autostart if present
       ansible.builtin.shell: |
-        echo "=== DESKTOP ENVIRONMENTS ==="
-
-        if command -v cinnamon-session >/dev/null 2>&1; then
-          echo "Cinnamon: INSTALLED"
-        else
-          echo "Cinnamon: NOT FOUND"
-        fi
-
-        if command -v xfce4-session >/dev/null 2>&1; then
-          echo "XFCE: INSTALLED"
-        else
-          echo "XFCE: NOT FOUND"
-        fi
-      register: desktop_check
+        find /home -maxdepth 3 \
+          -type f \
+          -path "*/.config/autostart/security-awareness-kiosk.desktop" \
+          -delete
+      args:
+        executable: /bin/bash
       changed_when: false
 
-    - name: Display desktop environments
-      ansible.builtin.debug:
-        msg: "{{ desktop_check.stdout }}"
-
-    # =========================================================
-    # 7. Verify configuration
-    # =========================================================
-
-    - name: Verify launcher
+    - name: Verify launcher exists
       ansible.builtin.stat:
         path: "{{ launcher_path }}"
-      register: launcher_status
+      register: launcher_stat
 
-    - name: Verify autostart
+    - name: Verify desktop entry exists
       ansible.builtin.stat:
-        path: "{{ autostart_file }}"
-      register: autostart_status
+        path: "{{ desktop_file }}"
+      register: desktop_stat
 
-    - name: Show final configuration
+    - name: Show deployment result
       ansible.builtin.debug:
         msg:
-          - "Launcher exists: {{ launcher_status.stat.exists }}"
-          - "Autostart exists: {{ autostart_status.stat.exists }}"
-          - "Autostart file: {{ autostart_file }}"
-          - "Configuration applies to: ALL GUI USERS"
-          - "Cinnamon support: ENABLED"
-          - "XFCE support: ENABLED"
-          - "User-specific automatic login: NOT CONFIGURED"
+          - "Security Awareness kiosk configured."
+          - "Launcher: {{ launcher_path }}"
+          - "System-wide autostart: {{ desktop_file }}"
+          - "Launcher exists: {{ launcher_stat.stat.exists }}"
+          - "Desktop entry exists: {{ desktop_stat.stat.exists }}"
+          - "No user-specific autologin configured."
+          - "Works when any user starts a Cinnamon/XFCE graphical session."
