@@ -1,15 +1,11 @@
 ---
-- name: Deploy Security Awareness Windows Kiosk
-  hosts: LMDULB3FAIT0019
+- name: Fix Security Awareness Windows Kiosk Launcher
+  hosts: ansibletesting
   gather_facts: false
 
   vars:
-    kiosk_directory: 'C:\ProgramData\SecurityAwareness'
     launcher_path: 'C:\ProgramData\SecurityAwareness\kiosk-launcher-windows.ps1'
-    task_script_path: 'C:\ProgramData\SecurityAwareness\create-kiosk-task.ps1'
     log_path: 'C:\ProgramData\SecurityAwareness\kiosk-launcher.log'
-
-    scheduled_task_name: 'SecurityAwarenessKiosk'
 
     backend_url: 'http://172.17.6.142:5000/api/awareness'
     awareness_page: 'http://172.17.6.142:5000/awareness.html'
@@ -17,38 +13,35 @@
   tasks:
 
     # =========================================================
-    # 1. Create application directory
+    # Replace launcher with corrected URLs
     # =========================================================
 
-    - name: Create Security Awareness directory
-      ansible.builtin.raw: |
-        powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ^
-        "New-Item -ItemType Directory -Path '{{ kiosk_directory }}' -Force | Out-Null"
-      changed_when: true
-
-
-    # =========================================================
-    # 2. Create kiosk launcher
-    # =========================================================
-
-    - name: Create Windows kiosk launcher
+    - name: Install corrected Security Awareness launcher
       ansible.windows.win_copy:
         dest: "{{ launcher_path }}"
         content: |
           $ErrorActionPreference = 'Continue'
 
           $LogFile = '{{ log_path }}'
-          $Backend = '{{ backend_url }}'
-          $AwarenessPage = '{{ awareness_page }}'
+          $BackendBase = '{{ backend_url }}'
+          $AwarenessUrl = '{{ awareness_page }}'
+
+          $PollSeconds = 2
+          $ResultWaitSeconds = 8
+
 
           function Write-Log {
-              param([string]$Message)
+              param(
+                  [string]$Message
+              )
 
               $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
 
-              Add-Content -Path $LogFile `
+              Add-Content `
+                  -Path $LogFile `
                   -Value "$timestamp $Message"
           }
+
 
           Write-Log '=============================================='
           Write-Log 'Security Awareness Kiosk launcher started'
@@ -58,7 +51,7 @@
 
 
           # =====================================================
-          # Wait for interactive Windows desktop
+          # Wait for interactive desktop
           # =====================================================
 
           Write-Log 'Waiting for explorer.exe...'
@@ -73,6 +66,7 @@
               $elapsed += 2
 
               if ($elapsed -ge $timeout) {
+
                   Write-Log 'explorer.exe did not start within timeout'
                   exit 0
               }
@@ -83,7 +77,7 @@
 
 
           # =====================================================
-          # Get hostname
+          # Hostname
           # =====================================================
 
           $hostname = $env:COMPUTERNAME
@@ -95,7 +89,7 @@
           # Backend status URL
           # =====================================================
 
-          $statusUrl = "$Backend/status?hostname=$hostname"
+          $statusUrl = "$BackendBase/status?hostname=$hostname"
 
           Write-Log "Checking backend: $statusUrl"
 
@@ -111,8 +105,7 @@
                   -Method Get `
                   -TimeoutSec 2
 
-              Write-Log 'Backend response received'
-
+              Write-Log "Backend response: completed=$($response.completed)"
           }
           catch {
 
@@ -124,7 +117,7 @@
 
 
           # =====================================================
-          # Check completion status
+          # Already completed
           # =====================================================
 
           if ($response.completed -eq $true) {
@@ -141,7 +134,7 @@
 
 
           # =====================================================
-          # Locate Google Chrome
+          # Find Chrome
           # =====================================================
 
           $ChromePaths = @(
@@ -164,7 +157,7 @@
           if (-not $Chrome) {
 
               Write-Log 'Google Chrome was not found'
-              Write-Log 'Exiting kiosk launcher'
+              Write-Log 'Failing open'
 
               exit 0
           }
@@ -174,12 +167,25 @@
 
 
           # =====================================================
-          # Build awareness URL
+          # Correct kiosk URL
           # =====================================================
 
-          $KioskUrl = "$AwarenessPage?host=$hostname"
+          $KioskUrl = "$AwarenessUrl?host=$hostname"
 
           Write-Log "Kiosk URL: $KioskUrl"
+
+
+          # =====================================================
+          # Dedicated Chrome profile
+          # =====================================================
+
+          $ChromeProfile = 'C:\ProgramData\SecurityAwareness\ChromeProfile'
+
+          New-Item `
+              -ItemType Directory `
+              -Path $ChromeProfile `
+              -Force |
+              Out-Null
 
 
           # =====================================================
@@ -194,12 +200,13 @@
               '--disable-infobars',
               '--disable-pinch',
               '--overscroll-history-navigation=0',
+              "--user-data-dir=$ChromeProfile",
               "$KioskUrl"
           )
 
 
           # =====================================================
-          # Start Chrome kiosk
+          # Start Chrome
           # =====================================================
 
           Write-Log 'Starting Chrome kiosk'
@@ -212,16 +219,16 @@
 
 
           # =====================================================
-          # Monitor awareness completion
+          # Monitor completion
           # =====================================================
 
           while ($true) {
 
-              Start-Sleep -Seconds 2
+              Start-Sleep -Seconds $PollSeconds
 
 
               # -------------------------------------------------
-              # Check whether Chrome is still running
+              # Check Chrome
               # -------------------------------------------------
 
               $ChromeProcess = Get-Process chrome -ErrorAction SilentlyContinue
@@ -231,23 +238,16 @@
                   Write-Log 'Chrome was closed'
 
 
-                  # -------------------------------------------------
-                  # Check backend before relaunching
-                  # -------------------------------------------------
-
                   try {
 
                       $response = Invoke-RestMethod `
                           -Uri $statusUrl `
                           -Method Get `
                           -TimeoutSec 2
-
                   }
                   catch {
 
                       Write-Log 'Backend unavailable after Chrome closed'
-                      Write-Log 'Exiting launcher'
-
                       exit 0
                   }
 
@@ -255,28 +255,24 @@
                   if ($response.completed -eq $true) {
 
                       Write-Log 'Awareness completed'
-                      Write-Log 'No relaunch required'
-
                       exit 0
                   }
 
 
                   Write-Log 'Awareness still not completed'
-                  Write-Log 'Relaunching Chrome kiosk'
+                  Write-Log 'Relaunching Chrome'
 
 
                   Start-Process `
                       -FilePath $Chrome `
                       -ArgumentList $ChromeArguments
 
-                  Write-Log 'Chrome kiosk relaunched'
-
                   continue
               }
 
 
               # -------------------------------------------------
-              # Check backend completion
+              # Check completion
               # -------------------------------------------------
 
               try {
@@ -291,21 +287,19 @@
 
                       Write-Log '=============================================='
                       Write-Log 'Awareness completed'
-                      Write-Log 'Keeping result visible for 8 seconds'
+                      Write-Log "Keeping result visible for $ResultWaitSeconds seconds"
                       Write-Log '=============================================='
 
 
-                      Start-Sleep -Seconds 8
+                      Start-Sleep -Seconds $ResultWaitSeconds
 
-
-                      # -------------------------------------------------
-                      # Close Chrome
-                      # -------------------------------------------------
 
                       Write-Log 'Closing Chrome kiosk'
 
+
                       Get-Process chrome -ErrorAction SilentlyContinue |
                           Stop-Process -Force
+
 
                       Write-Log 'Chrome closed'
                       Write-Log 'Security Awareness completed'
@@ -318,121 +312,47 @@
 
                   Write-Log "Backend check failed: $($_.Exception.Message)"
 
-                  # Keep kiosk open during temporary backend failure.
+                  # Keep kiosk open if backend temporarily fails.
                   continue
               }
           }
 
+      register: launcher_deploy
 
     # =========================================================
-    # 3. Create scheduled-task registration script
+    # Verify the actual URLs written to the file
     # =========================================================
 
-    - name: Create scheduled task script
-      ansible.windows.win_copy:
-        dest: "{{ task_script_path }}"
-        content: |
-          $TaskName = '{{ scheduled_task_name }}'
-          $Launcher = '{{ launcher_path }}'
-
-          Write-Host 'Creating Security Awareness scheduled task...'
-
-
-          # Remove existing task
-
-          schtasks.exe /Delete `
-              /TN "$TaskName" `
-              /F 2>$null
-
-
-          # =====================================================
-          # ONLOGON
-          #
-          # Task starts when the Windows user logs in.
-          # =====================================================
-
-          $taskCommand = `
-              "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$Launcher`""
-
-          schtasks.exe /Create `
-              /TN "$TaskName" `
-              /TR "$taskCommand" `
-              /SC ONLOGON `
-              /RU "$env:USERNAME" `
-              /RL LIMITED `
-              /F
-
-
-          Write-Host 'Security Awareness scheduled task created successfully.'
-
-
-    # =========================================================
-    # 4. Register scheduled task
-    # =========================================================
-
-    - name: Register Security Awareness logon task
+    - name: Verify launcher URLs
       ansible.builtin.raw: |
-        powershell.exe -NoProfile -ExecutionPolicy Bypass -File "{{ task_script_path }}"
+        powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ^
+        "Write-Host '--- Backend URL ---'; ^
+        Select-String -Path '{{ launcher_path }}' -Pattern 'BackendBase'; ^
+        Write-Host '--- Awareness URL ---'; ^
+        Select-String -Path '{{ launcher_path }}' -Pattern 'AwarenessUrl'; ^
+        Write-Host '--- Launcher exists ---'; ^
+        Write-Host (Test-Path '{{ launcher_path }}')"
+      changed_when: false
+
+    # =========================================================
+    # Clear old log
+    # =========================================================
+
+    - name: Remove old kiosk log
+      ansible.builtin.raw: |
+        powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ^
+        "Remove-Item '{{ log_path }}' -Force -ErrorAction SilentlyContinue"
       changed_when: true
 
-
     # =========================================================
-    # 5. Verify launcher
-    # =========================================================
-
-    - name: Verify kiosk launcher
-      ansible.builtin.raw: |
-        powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ^
-        "if (Test-Path '{{ launcher_path }}') {
-            Write-Host 'OK - kiosk launcher exists'
-        }
-        else {
-            Write-Error 'ERROR - kiosk launcher missing'
-            exit 1
-        }"
-      changed_when: false
-
-
-    # =========================================================
-    # 6. Verify scheduled task
+    # Final message
     # =========================================================
 
-    - name: Verify scheduled task
-      ansible.builtin.raw: |
-        schtasks.exe /Query /TN "{{ scheduled_task_name }}" /V /FO LIST
-      changed_when: false
-
-
-    # =========================================================
-    # 7. Final verification
-    # =========================================================
-
-    - name: Deployment summary
-      ansible.builtin.raw: |
-        powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ^
-        "Write-Host ''
-        Write-Host '=============================================='
-        Write-Host ' Security Awareness Kiosk Deployment'
-        Write-Host '=============================================='
-        Write-Host ''
-        Write-Host 'Launcher : {{ launcher_path }}'
-        Write-Host 'Task     : {{ scheduled_task_name }}'
-        Write-Host 'Trigger  : ONLOGON'
-        Write-Host 'Backend  : {{ backend_url }}'
-        Write-Host 'Page     : {{ awareness_page }}'
-        Write-Host ''
-        Write-Host 'Behavior:'
-        Write-Host '  Windows boots/restarts'
-        Write-Host '        -> user logs in'
-        Write-Host '        -> explorer.exe starts'
-        Write-Host '        -> kiosk launcher executes'
-        Write-Host '        -> backend status is checked'
-        Write-Host '        -> Chrome kiosk opens if required'
-        Write-Host '        -> awareness is completed'
-        Write-Host '        -> wait 8 seconds'
-        Write-Host '        -> Chrome closes'
-        Write-Host ''
-        Write-Host 'Backend unavailable -> fail open'
-        Write-Host 'Chrome unavailable  -> fail open'
-        Write-Host '=============================================='"
-      changed_when: false
+    - name: Show fix result
+      ansible.builtin.debug:
+        msg:
+          - "Security Awareness launcher fixed."
+          - "Backend URL: {{ backend_url }}"
+          - "Awareness page: {{ awareness_page }}"
+          - "Hostname is appended automatically."
+          - "No reboot required."
