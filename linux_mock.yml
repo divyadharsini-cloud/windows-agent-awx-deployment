@@ -14,7 +14,6 @@
     launcher_path: "/opt/security-awareness/kiosk-launcher-linux.sh"
 
     # Old XFCE/XDG autostart
-    autostart_directory: "/etc/xdg/autostart"
     autostart_file: "/etc/xdg/autostart/security-awareness-kiosk.desktop"
 
     # Systemd user service
@@ -32,7 +31,7 @@
   tasks:
 
     # =========================================================
-    # 1. Create application directory
+    # 1. Create Security Awareness directory
     # =========================================================
 
     - name: Create Security Awareness directory
@@ -71,6 +70,9 @@
           # Keep result/score visible for 8 seconds
           COMPLETION_GRACE_SECONDS=8
 
+          # Wait up to 30 seconds for graphical environment
+          GUI_WAIT_SECONDS=30
+
           # Debug log
           LOG_FILE="/tmp/security-awareness-kiosk.log"
 
@@ -92,6 +94,10 @@
           }
 
 
+          # =====================================================
+          # Startup log
+          # =====================================================
+
           log "=========================================="
           log "Security Awareness Kiosk starting"
           log "USER=$USER"
@@ -104,27 +110,43 @@
 
           # =====================================================
           # Wait for graphical environment
+          #
+          # The systemd user service can start before XFCE
+          # has finished initializing the graphical session.
+          #
+          # Therefore wait up to 30 seconds for DISPLAY or
+          # WAYLAND_DISPLAY to become available.
           # =====================================================
 
-          if [ -z "$DISPLAY" ] && [ -z "$WAYLAND_DISPLAY" ]; then
+          log "Waiting for graphical session..."
 
-              log "Graphical environment not ready."
+          GUI_READY="false"
 
-              for i in {1..10}
-              do
-                  sleep 0.5
+          for i in $(seq 1 15)
+          do
 
-                  if [ -n "$DISPLAY" ] || [ -n "$WAYLAND_DISPLAY" ]; then
-                      break
-                  fi
-              done
+              if [ -n "$DISPLAY" ] || [ -n "$WAYLAND_DISPLAY" ]; then
 
-          fi
+                  GUI_READY="true"
+                  break
+
+              fi
+
+              log "Graphical session not ready. Waiting... ($i/15)"
+
+              sleep 2
+
+          done
 
 
-          if [ -z "$DISPLAY" ] && [ -z "$WAYLAND_DISPLAY" ]; then
+          # =====================================================
+          # Graphical session still unavailable
+          # =====================================================
 
-              log "ERROR: No graphical display available."
+          if [ "$GUI_READY" != "true" ]; then
+
+              log "ERROR: No graphical display available after 30 seconds."
+              log "Security Awareness kiosk will not start."
 
               exit 0
 
@@ -132,6 +154,8 @@
 
 
           log "Graphical session available."
+          log "DISPLAY=$DISPLAY"
+          log "XDG_SESSION_TYPE=$XDG_SESSION_TYPE"
 
 
           # =====================================================
@@ -196,6 +220,20 @@
 
 
           # =====================================================
+          # Validate API response
+          # =====================================================
+
+          if [ -z "$STATUS" ]; then
+
+              log "ERROR: Empty response received from backend."
+              log "Fail-open: Firefox kiosk will NOT be launched."
+
+              exit 0
+
+          fi
+
+
+          # =====================================================
           # Already completed
           # =====================================================
 
@@ -209,6 +247,10 @@
 
           fi
 
+
+          # =====================================================
+          # Test not completed
+          # =====================================================
 
           log "Mock test is NOT completed."
           log "Starting Firefox kiosk."
@@ -235,9 +277,14 @@
           fi
 
 
+          # =====================================================
+          # Firefox not found
+          # =====================================================
+
           if [ -z "$FIREFOX" ]; then
 
               log "ERROR: Firefox not found."
+              log "Security Awareness kiosk cannot start."
 
               exit 1
 
@@ -278,7 +325,7 @@
           # Allow Firefox to initialize
           # =====================================================
 
-          sleep 1
+          sleep 2
 
 
           # =====================================================
@@ -305,7 +352,10 @@
           while kill -0 "$FIREFOX_PID" 2>/dev/null
           do
 
+              # =================================================
               # Poll every 2 seconds
+              # =================================================
+
               sleep "$POLL_SECONDS"
 
 
@@ -337,6 +387,19 @@
               fi
 
 
+              # =================================================
+              # Empty response
+              # =================================================
+
+              if [ -z "$STATUS" ]; then
+
+                  log "Temporary API failure: empty response."
+
+                  continue
+
+              fi
+
+
               log "Status=$STATUS"
 
 
@@ -353,16 +416,16 @@
                   log "=========================================="
 
 
-                  # ------------------------------------------------
+                  # =================================================
                   # Keep result/score visible
-                  # ------------------------------------------------
+                  # =================================================
 
                   sleep "$COMPLETION_GRACE_SECONDS"
 
 
-                  # ------------------------------------------------
+                  # =================================================
                   # Close ONLY kiosk Firefox
-                  # ------------------------------------------------
+                  # =================================================
 
                   log "Closing kiosk Firefox PID=$FIREFOX_PID"
 
@@ -374,16 +437,18 @@
                   fi
 
 
-                  # ------------------------------------------------
+                  # =================================================
                   # Wait for graceful exit
-                  # ------------------------------------------------
+                  # =================================================
 
-                  for i in {1..10}
+                  for i in $(seq 1 10)
                   do
 
                       if ! kill -0 "$FIREFOX_PID" 2>/dev/null
                       then
+
                           break
+
                       fi
 
                       sleep 0.5
@@ -391,9 +456,9 @@
                   done
 
 
-                  # ------------------------------------------------
+                  # =================================================
                   # Force close if necessary
-                  # ------------------------------------------------
+                  # =================================================
 
                   if kill -0 "$FIREFOX_PID" 2>/dev/null
                   then
@@ -409,9 +474,9 @@
                   log "Kiosk Firefox closed."
 
 
-                  # ------------------------------------------------
+                  # =================================================
                   # Remove dedicated kiosk profile
-                  # ------------------------------------------------
+                  # =================================================
 
                   rm -rf "$FIREFOX_PROFILE"
 
@@ -424,6 +489,10 @@
 
           done
 
+
+          # =====================================================
+          # Launcher finished
+          # =====================================================
 
           log "Security Awareness launcher exiting."
 
@@ -468,7 +537,7 @@
           [Unit]
           Description=Security Awareness Kiosk Launcher
 
-          # Start after graphical session becomes available
+          # Start after graphical session target
           After=graphical-session.target
 
           [Service]
@@ -481,7 +550,7 @@
           Restart=no
 
           # Allow GUI initialization
-          TimeoutStartSec=30
+          TimeoutStartSec=40
 
           [Install]
           WantedBy=graphical-session.target
@@ -491,8 +560,11 @@
     # 6. Enable systemd user service globally
     #
     # IMPORTANT:
-    # systemctl --global daemon-reload is NOT valid.
-    # Therefore we only use --global enable here.
+    # Do NOT use:
+    #
+    # systemctl --global daemon-reload
+    #
+    # because --global does not support daemon-reload.
     # =========================================================
 
     - name: Enable Security Awareness kiosk service globally
@@ -600,6 +672,7 @@
           - "Systemd service: {{ systemd_service_file }}"
           - "Backend: {{ backend_base }}"
           - "Awareness URL: {{ awareness_base_url }}"
+          - "GUI wait time: 30 seconds"
           - "Polling interval: 2 seconds"
           - "API timeout: 2 seconds"
           - "Result display time: 8 seconds"
