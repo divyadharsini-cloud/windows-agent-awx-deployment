@@ -153,15 +153,47 @@
         -Command "New-Item -ItemType Directory -Path '{{ kiosk_directory }}' -Force | Out-Null"
 
     # ------------------------------------------------------------
-    # 2. Write the launcher script (base64-encoded to avoid all
-    #    quoting/escaping problems with the embedded PowerShell)
+    # 2. Write the launcher script
+    #
+    # The script is base64-encoded to avoid quoting/escaping
+    # problems, but a single command with the WHOLE base64 string
+    # is too long for cmd.exe's ~8191 character limit. So it's
+    # split into small chunks, appended to a temp file across
+    # several commands, then decoded in one final step.
     # ------------------------------------------------------------
 
-    - name: Create Security Awareness launcher
+    - name: Compute base64-encoded launcher content
+      ansible.builtin.set_fact:
+        b64_content: "{{ kiosk_script_content | b64encode }}"
+
+    - name: Compute number of chunks needed
+      ansible.builtin.set_fact:
+        b64_chunk_size: 2000
+        b64_chunk_count: "{{ ((b64_content | length) / 2000) | round(0, 'ceil') | int }}"
+
+    - name: Clear any existing temp base64 file
       ansible.builtin.raw: >-
-        powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass
-        -Command "[IO.File]::WriteAllText('{{ launcher_path }}',
-        [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{{ kiosk_script_content | b64encode }}')))"
+        powershell.exe -NoProfile -NonInteractive -Command
+        "Remove-Item -Path '{{ kiosk_directory }}\launcher.b64' -ErrorAction SilentlyContinue"
+      failed_when: false
+
+    - name: Write base64 chunks to a temp file
+      ansible.builtin.raw: >-
+        powershell.exe -NoProfile -NonInteractive -Command
+        "Add-Content -Path '{{ kiosk_directory }}\launcher.b64' -NoNewline -Value '{{ b64_content[item|int * 2000 : (item|int + 1) * 2000] }}'"
+      loop: "{{ range(0, b64_chunk_count | int) | list }}"
+
+    - name: Decode the temp file into the real launcher script
+      ansible.builtin.raw: >-
+        powershell.exe -NoProfile -NonInteractive -Command
+        "[IO.File]::WriteAllText('{{ launcher_path }}',
+        [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String((Get-Content -Path '{{ kiosk_directory }}\launcher.b64' -Raw))))"
+
+    - name: Remove the temp base64 file
+      ansible.builtin.raw: >-
+        powershell.exe -NoProfile -NonInteractive -Command
+        "Remove-Item -Path '{{ kiosk_directory }}\launcher.b64' -ErrorAction SilentlyContinue"
+      failed_when: false
 
     # ------------------------------------------------------------
     # 3. Remove any old scheduled task before recreating it
