@@ -5,11 +5,24 @@
   gather_facts: false
 
   vars:
+    # =========================================================
+    # Application paths
+    # =========================================================
+
     launcher_directory: "/opt/security-awareness"
     launcher_path: "/opt/security-awareness/kiosk-launcher-linux.sh"
 
+    # Old XFCE autostart file
     autostart_directory: "/etc/xdg/autostart"
     autostart_file: "/etc/xdg/autostart/security-awareness-kiosk.desktop"
+
+    # Systemd user service
+    systemd_user_directory: "/etc/systemd/user"
+    systemd_service_file: "/etc/systemd/user/security-awareness-kiosk.service"
+
+    # =========================================================
+    # Backend
+    # =========================================================
 
     backend_base: "http://172.17.6.142:5000/api/awareness"
     awareness_base_url: "http://172.17.6.142:5000/awareness.html"
@@ -42,139 +55,384 @@
         content: |
           #!/bin/bash
 
+          # =====================================================
+          # Security Awareness Firefox Kiosk Launcher
+          # =====================================================
+
           BACKEND_BASE="{{ backend_base }}"
           AWARENESS_BASE_URL="{{ awareness_base_url }}"
 
           # Check backend every 2 seconds
           POLL_SECONDS=2
 
-          # Keep result screen visible for 8 seconds
+          # Keep result/score visible for 8 seconds
           COMPLETION_GRACE_SECONDS=8
 
-          # Dedicated Firefox kiosk profile
+          # Debug log
+          LOG_FILE="/tmp/security-awareness-kiosk.log"
+
+          # Dedicated Firefox profile
           KIOSK_DIRECTORY="$HOME/.security-awareness"
           FIREFOX_PROFILE="$KIOSK_DIRECTORY/firefox-kiosk-profile"
 
+          # Make sure standard commands are available
+          export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+
+          # =====================================================
+          # Logging function
+          # =====================================================
+
+          log()
+          {
+              echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "$LOG_FILE"
+          }
+
+
+          log "=========================================="
+          log "Security Awareness Kiosk starting"
+          log "USER=$USER"
+          log "HOME=$HOME"
+          log "DISPLAY=$DISPLAY"
+          log "WAYLAND_DISPLAY=$WAYLAND_DISPLAY"
+          log "XDG_SESSION_TYPE=$XDG_SESSION_TYPE"
+          log "=========================================="
+
+
+          # =====================================================
+          # Wait for graphical session
+          # =====================================================
+
+          if [ -z "$DISPLAY" ] && [ -z "$WAYLAND_DISPLAY" ]; then
+
+              log "Graphical environment not ready."
+
+              for i in {1..10}
+              do
+                  sleep 0.5
+
+                  if [ -n "$DISPLAY" ] || [ -n "$WAYLAND_DISPLAY" ]; then
+                      break
+                  fi
+              done
+
+          fi
+
+
+          if [ -z "$DISPLAY" ] && [ -z "$WAYLAND_DISPLAY" ]; then
+              log "ERROR: No graphical display available."
+              exit 0
+          fi
+
+
+          log "Graphical session available."
+
+
+          # =====================================================
+          # Prepare kiosk directories
+          # =====================================================
+
           mkdir -p "$KIOSK_DIRECTORY"
+          mkdir -p "$FIREFOX_PROFILE"
+
+
+          # =====================================================
+          # Get hostname
+          # =====================================================
 
           HOSTNAME_VALUE="$(hostname)"
 
-          # Pass hostname to awareness page
+          log "Hostname=$HOSTNAME_VALUE"
+
+
+          # =====================================================
+          # Build awareness URL
+          # =====================================================
+
           AWARENESS_URL="${AWARENESS_BASE_URL}?host=${HOSTNAME_VALUE}"
 
+          log "Awareness URL=$AWARENESS_URL"
 
-          # ===================================================
-          # Check completion BEFORE opening Firefox
-          # ===================================================
 
-          STATUS=$(curl -sS \
-              --connect-timeout 2 \
-              --max-time 2 \
-              "$BACKEND_BASE/status?hostname=$HOSTNAME_VALUE" \
-              2>/dev/null)
+          # =====================================================
+          # Check backend BEFORE opening Firefox
+          # =====================================================
 
-          # Backend unavailable -> do not lock user desktop
-          if [ $? -ne 0 ]; then
+          log "Checking completion status..."
+
+          STATUS=$(
+              /usr/bin/curl -sS \
+                  --connect-timeout 2 \
+                  --max-time 2 \
+                  "$BACKEND_BASE/status?hostname=$HOSTNAME_VALUE" \
+                  2>/dev/null
+          )
+
+          CURL_RESULT=$?
+
+          log "API curl result=$CURL_RESULT"
+          log "API response=$STATUS"
+
+
+          # =====================================================
+          # Backend unavailable
+          # =====================================================
+
+          if [ "$CURL_RESULT" -ne 0 ]; then
+
+              log "Backend unavailable."
+              log "Fail-open: Firefox kiosk will not be launched."
+
               exit 0
           fi
 
-          # Already completed -> do not open kiosk
-          if echo "$STATUS" | grep -q '"completed"[[:space:]]*:[[:space:]]*true'; then
+
+          # =====================================================
+          # Already completed
+          # =====================================================
+
+          if echo "$STATUS" | grep -q '"completed"[[:space:]]*:[[:space:]]*true'
+          then
+
+              log "Mock test already completed."
+              log "Firefox kiosk will NOT be opened."
+
               exit 0
           fi
 
 
-          # ===================================================
+          log "Mock test is NOT completed."
+          log "Firefox kiosk will be started."
+
+
+          # =====================================================
           # Find Firefox
-          # ===================================================
+          # =====================================================
 
-          FIREFOX="$(command -v firefox 2>/dev/null || true)"
+          FIREFOX=""
+
+          if [ -x "/usr/bin/firefox" ]; then
+
+              FIREFOX="/usr/bin/firefox"
+
+          elif [ -x "/snap/bin/firefox" ]; then
+
+              FIREFOX="/snap/bin/firefox"
+
+          elif command -v firefox >/dev/null 2>&1; then
+
+              FIREFOX="$(command -v firefox)"
+
+          fi
+
 
           if [ -z "$FIREFOX" ]; then
+
+              log "ERROR: Firefox not found."
+
               exit 1
           fi
 
 
-          # ===================================================
-          # Create dedicated Firefox profile
-          # ===================================================
-
-          mkdir -p "$FIREFOX_PROFILE"
+          log "Firefox=$FIREFOX"
 
 
-          # ===================================================
-          # Launch Firefox immediately in kiosk mode
-          # ===================================================
+          # =====================================================
+          # Clean stale Firefox profile locks
+          # =====================================================
+
+          rm -f "$FIREFOX_PROFILE/.parentlock" 2>/dev/null || true
+          rm -f "$FIREFOX_PROFILE/lock" 2>/dev/null || true
+
+
+          # =====================================================
+          # Launch Firefox kiosk
+          # =====================================================
+
+          log "Launching Firefox kiosk..."
 
           "$FIREFOX" \
               --no-remote \
               --profile "$FIREFOX_PROFILE" \
               --kiosk \
-              "$AWARENESS_URL" &
+              "$AWARENESS_URL" \
+              >> "$LOG_FILE" 2>&1 &
+
+          FIREFOX_PID=$!
 
 
-          # ===================================================
-          # Monitor Firefox and completion status
-          # ===================================================
+          log "Firefox PID=$FIREFOX_PID"
 
-          while pgrep -f -- "$FIREFOX_PROFILE" > /dev/null 2>&1
+
+          # =====================================================
+          # Small startup wait
+          # =====================================================
+
+          sleep 1
+
+
+          # =====================================================
+          # Verify Firefox process
+          # =====================================================
+
+          if ! kill -0 "$FIREFOX_PID" 2>/dev/null
+          then
+
+              log "ERROR: Firefox exited immediately."
+
+              exit 1
+          fi
+
+
+          log "Firefox kiosk is running."
+
+
+          # =====================================================
+          # Monitor completion
+          # =====================================================
+
+          while kill -0 "$FIREFOX_PID" 2>/dev/null
           do
 
+              # Poll every 2 seconds
               sleep "$POLL_SECONDS"
 
-              STATUS=$(curl -sS \
-                  --connect-timeout 2 \
-                  --max-time 2 \
-                  "$BACKEND_BASE/status?hostname=$HOSTNAME_VALUE" \
-                  2>/dev/null)
 
-              # Temporary API/network failure
-              if [ $? -ne 0 ]; then
+              # -------------------------------------------------
+              # Query backend
+              # -------------------------------------------------
+
+              STATUS=$(
+                  /usr/bin/curl -sS \
+                      --connect-timeout 2 \
+                      --max-time 2 \
+                      "$BACKEND_BASE/status?hostname=$HOSTNAME_VALUE" \
+                      2>/dev/null
+              )
+
+              CURL_RESULT=$?
+
+
+              # -------------------------------------------------
+              # Temporary backend/network failure
+              # -------------------------------------------------
+
+              if [ "$CURL_RESULT" -ne 0 ]; then
+
+                  log "Temporary API failure."
+
                   continue
               fi
 
 
+              log "Status=$STATUS"
+
+
               # =================================================
-              # Test completed
+              # Completion detected
               # =================================================
 
-              if echo "$STATUS" | grep -q '"completed"[[:space:]]*:[[:space:]]*true'; then
+              if echo "$STATUS" | grep -q '"completed"[[:space:]]*:[[:space:]]*true'
+              then
 
-                  # Give user time to view result/score
+                  log "=========================================="
+                  log "MOCK TEST COMPLETED"
+                  log "Keeping result screen visible for 8 seconds."
+                  log "=========================================="
+
+
+                  # ------------------------------------------------
+                  # Keep result/score visible
+                  # ------------------------------------------------
+
                   sleep "$COMPLETION_GRACE_SECONDS"
 
 
-                  # Find only Firefox processes using
-                  # the dedicated kiosk profile
-                  PIDS=$(pgrep -f -- "$FIREFOX_PROFILE" || true)
+                  # ------------------------------------------------
+                  # Close ONLY this Firefox instance
+                  # ------------------------------------------------
 
-                  # Close only kiosk Firefox
-                  for PID in $PIDS
+                  log "Closing kiosk Firefox PID=$FIREFOX_PID"
+
+                  if kill -0 "$FIREFOX_PID" 2>/dev/null
+                  then
+                      kill -TERM "$FIREFOX_PID" 2>/dev/null || true
+                  fi
+
+
+                  # ------------------------------------------------
+                  # Wait for graceful exit
+                  # ------------------------------------------------
+
+                  for i in {1..10}
                   do
-                      kill "$PID" 2>/dev/null || true
+
+                      if ! kill -0 "$FIREFOX_PID" 2>/dev/null
+                      then
+                          break
+                      fi
+
+                      sleep 0.5
+
                   done
 
 
-                  # Wait briefly for Firefox to exit
-                  sleep 2
+                  # ------------------------------------------------
+                  # Force close if necessary
+                  # ------------------------------------------------
+
+                  if kill -0 "$FIREFOX_PID" 2>/dev/null
+                  then
+
+                      log "Firefox still running."
+                      log "Force closing kiosk Firefox."
+
+                      kill -KILL "$FIREFOX_PID" 2>/dev/null || true
+
+                  fi
 
 
-                  # Remove only kiosk profile
+                  log "Kiosk Firefox closed."
+
+
+                  # ------------------------------------------------
+                  # Remove dedicated kiosk profile
+                  # ------------------------------------------------
+
                   rm -rf "$FIREFOX_PROFILE"
 
+                  log "Kiosk Firefox profile removed."
+                  log "Security Awareness Kiosk completed."
+
                   break
+
               fi
 
           done
 
 
+          log "Security Awareness launcher exiting."
+
+          exit 0
+
+
     # =========================================================
-    # 3. Ensure system-wide autostart directory exists
+    # 3. Remove old XFCE / XDG autostart entry
     # =========================================================
 
-    - name: Ensure autostart directory exists
+    - name: Remove old autostart entry
       ansible.builtin.file:
-        path: "{{ autostart_directory }}"
+        path: "{{ autostart_file }}"
+        state: absent
+
+
+    # =========================================================
+    # 4. Ensure systemd user directory exists
+    # =========================================================
+
+    - name: Ensure systemd user directory exists
+      ansible.builtin.file:
+        path: "{{ systemd_user_directory }}"
         state: directory
         owner: root
         group: root
@@ -182,27 +440,63 @@
 
 
     # =========================================================
-    # 4. Create Firefox kiosk autostart entry
+    # 5. Create systemd user service
     # =========================================================
 
-    - name: Create Firefox kiosk autostart entry
+    - name: Create Security Awareness kiosk systemd user service
       ansible.builtin.copy:
-        dest: "{{ autostart_file }}"
+        dest: "{{ systemd_service_file }}"
         owner: root
         group: root
         mode: "0644"
         content: |
-          [Desktop Entry]
-          Type=Application
-          Name=Security Awareness Firefox Kiosk
-          Comment=Launch Security Awareness Mock Test
-          Exec={{ launcher_path }}
-          Terminal=false
-          X-GNOME-Autostart-enabled=true
+          [Unit]
+          Description=Security Awareness Kiosk Launcher
+
+          # Start after graphical session becomes available
+          After=graphical-session.target
+
+          [Service]
+          Type=simple
+
+          # Run the kiosk launcher
+          ExecStart={{ launcher_path }}
+
+          # Do not restart after successful completion
+          Restart=no
+
+          # Allow enough time for GUI initialization
+          TimeoutStartSec=30
+
+          [Install]
+          WantedBy=graphical-session.target
 
 
     # =========================================================
-    # 5. Verify launcher
+    # 6. Reload systemd user units globally
+    # =========================================================
+
+    - name: Reload global systemd user units
+      ansible.builtin.command:
+        cmd: systemctl --global daemon-reload
+      changed_when: false
+
+
+    # =========================================================
+    # 7. Enable service globally for all users
+    # =========================================================
+
+    - name: Enable Security Awareness kiosk service globally
+      ansible.builtin.command:
+        cmd: systemctl --global enable security-awareness-kiosk.service
+      register: systemd_enable_result
+      changed_when: >
+        'Created symlink' in systemd_enable_result.stdout or
+        'Created symlink' in systemd_enable_result.stderr
+
+
+    # =========================================================
+    # 8. Verify launcher
     # =========================================================
 
     - name: Verify launcher
@@ -212,28 +506,79 @@
 
 
     # =========================================================
-    # 6. Verify autostart
+    # 9. Verify systemd service
     # =========================================================
 
-    - name: Verify autostart
+    - name: Verify systemd service
+      ansible.builtin.stat:
+        path: "{{ systemd_service_file }}"
+      register: systemd_service_status
+
+
+    # =========================================================
+    # 10. Verify old autostart is removed
+    # =========================================================
+
+    - name: Verify old autostart is removed
       ansible.builtin.stat:
         path: "{{ autostart_file }}"
-      register: autostart_status
+      register: old_autostart_status
 
 
     # =========================================================
-    # 7. Display deployment result
+    # 11. Check Firefox
+    # =========================================================
+
+    - name: Check Firefox
+      ansible.builtin.shell:
+        cmd: |
+          if [ -x /usr/bin/firefox ]; then
+              echo "/usr/bin/firefox"
+          elif [ -x /snap/bin/firefox ]; then
+              echo "/snap/bin/firefox"
+          elif command -v firefox >/dev/null 2>&1; then
+              command -v firefox
+          else
+              exit 1
+          fi
+      register: firefox_check
+      changed_when: false
+      failed_when: false
+
+
+    # =========================================================
+    # 12. Check curl
+    # =========================================================
+
+    - name: Check curl
+      ansible.builtin.command:
+        cmd: /usr/bin/curl --version
+      register: curl_check
+      changed_when: false
+      failed_when: false
+
+
+    # =========================================================
+    # 13. Display deployment result
     # =========================================================
 
     - name: Display deployment result
       ansible.builtin.debug:
         msg:
-          - "Security Awareness Linux deployment completed."
+          - "=========================================="
+          - "Security Awareness Linux Deployment"
+          - "=========================================="
           - "Launcher exists: {{ launcher_status.stat.exists }}"
-          - "Autostart exists: {{ autostart_status.stat.exists }}"
+          - "Systemd service exists: {{ systemd_service_status.stat.exists }}"
+          - "Old autostart exists: {{ old_autostart_status.stat.exists }}"
+          - "Firefox: {{ firefox_check.stdout | default('NOT FOUND') }}"
+          - "Curl installed: {{ curl_check.rc == 0 }}"
           - "Launcher: {{ launcher_path }}"
-          - "Autostart: {{ autostart_file }}"
-          - "Firefox URL: {{ awareness_base_url }}"
+          - "Systemd service: {{ systemd_service_file }}"
+          - "Backend: {{ backend_base }}"
+          - "Awareness URL: {{ awareness_base_url }}"
           - "Polling interval: 2 seconds"
           - "API timeout: 2 seconds"
-          - "Result screen grace period: 8 seconds"
+          - "Result display time: 8 seconds"
+          - "Debug log: /tmp/security-awareness-kiosk.log"
+          - "=========================================="
