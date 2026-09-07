@@ -1,569 +1,248 @@
 ---
-- name: Deploy Security Awareness Firefox Kiosk - Linux Mint XFCE Startup
+- name: Configure Security Awareness Kiosk at system startup
   hosts: ansibletesting
   become: true
-  gather_facts: false
+  gather_facts: true
 
   vars:
+    kiosk_user: "adminit"
+    kiosk_home: "/home/adminit"
 
-    # =========================================================
-    # Application
-    # =========================================================
-
-    kiosk_directory: "/opt/security-awareness"
-    launcher_path: "/opt/security-awareness/kiosk-launcher-linux.sh"
-
-
-    # =========================================================
-    # XFCE system-wide autostart
-    # =========================================================
-
-    autostart_directory: "/etc/xdg/autostart"
-    autostart_file: "/etc/xdg/autostart/security-awareness-kiosk.desktop"
-
-
-    # =========================================================
-    # Backend
-    # =========================================================
+    kiosk_dir: "/opt/security-awareness"
+    launcher: "/opt/security-awareness/kiosk-launcher-linux.sh"
 
     backend_base: "http://172.17.6.142:5000/api/awareness"
-    awareness_base_url: "http://172.17.6.142:5000/awareness.html"
+    awareness_url: "http://172.17.6.142:5000/awareness.html"
 
+    autostart_file: "/etc/xdg/autostart/security-awareness-kiosk.desktop"
 
   tasks:
 
-    # =========================================================
-    # 1. Create application directory
-    # =========================================================
+    # ---------------------------------------------------------
+    # 1. Install required packages
+    # ---------------------------------------------------------
+    - name: Install Firefox and curl
+      ansible.builtin.apt:
+        name:
+          - firefox
+          - curl
+        state: present
+        update_cache: true
 
-    - name: Create Security Awareness directory
+    # ---------------------------------------------------------
+    # 2. Create kiosk directory
+    # ---------------------------------------------------------
+    - name: Create kiosk directory
       ansible.builtin.file:
-        path: "{{ kiosk_directory }}"
+        path: "{{ kiosk_dir }}"
         state: directory
-        owner: root
-        group: root
+        owner: "{{ kiosk_user }}"
+        group: "{{ kiosk_user }}"
         mode: "0755"
 
-
-    # =========================================================
-    # 2. Create launcher
-    # =========================================================
-
+    # ---------------------------------------------------------
+    # 3. Create launcher
+    # ---------------------------------------------------------
     - name: Create Security Awareness launcher
       ansible.builtin.copy:
-        dest: "{{ launcher_path }}"
-        owner: root
-        group: root
+        dest: "{{ launcher }}"
+        owner: "{{ kiosk_user }}"
+        group: "{{ kiosk_user }}"
         mode: "0755"
-
         content: |
           #!/bin/bash
 
-          # =====================================================
-          # Security Awareness Firefox Kiosk
-          # Linux Mint / XFCE
-          # =====================================================
+          LOG="/tmp/security-awareness-kiosk.log"
 
-          BACKEND_BASE="{{ backend_base }}"
-          AWARENESS_BASE_URL="{{ awareness_base_url }}"
+          echo "========================================" >> "$LOG"
+          echo "$(date) : Kiosk startup" >> "$LOG"
 
-          POLL_SECONDS=2
-          RESULT_WAIT_SECONDS=8
+          # Wait until Cinnamon desktop is ready
+          for i in {1..30}; do
+              if [ -n "$DISPLAY" ]; then
+                  echo "$(date) : DISPLAY=$DISPLAY" >> "$LOG"
+                  break
+              fi
 
-          LOG_FILE="/tmp/security-awareness-kiosk.log"
-
-          KIOSK_DIRECTORY="$HOME/.security-awareness"
-          FIREFOX_PROFILE="$KIOSK_DIRECTORY/firefox-kiosk-profile"
-
-
-          # =====================================================
-          # Logging
-          # =====================================================
-
-          log()
-          {
-              echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "$LOG_FILE"
-          }
-
-
-          log "=========================================="
-          log "Security Awareness Kiosk starting"
-          log "USER=$USER"
-          log "HOME=$HOME"
-          log "DISPLAY=$DISPLAY"
-          log "XDG_SESSION_TYPE=$XDG_SESSION_TYPE"
-          log "=========================================="
-
-
-          # =====================================================
-          # Brief settle time — just enough for XFCE to set
-          # the DISPLAY variable, not a full desktop-load wait.
-          # =====================================================
-
-          log "Waiting briefly for desktop to settle..."
-
-          sleep 2
-
-
-          # =====================================================
-          # Check DISPLAY
-          # =====================================================
+              sleep 2
+          done
 
           if [ -z "$DISPLAY" ]; then
-
-              log "ERROR: DISPLAY is not available."
-              log "Kiosk will not start."
-
+              echo "$(date) : No DISPLAY available" >> "$LOG"
               exit 0
-
           fi
 
+          HOSTNAME=$(hostname)
 
-          log "Desktop ready."
-          log "DISPLAY=$DISPLAY"
+          STATUS_URL="{{ backend_base }}/status?hostname=${HOSTNAME}"
+          AWARENESS_URL="{{ awareness_url }}?host=${HOSTNAME}"
 
+          echo "$(date) : Hostname=$HOSTNAME" >> "$LOG"
+          echo "$(date) : STATUS_URL=$STATUS_URL" >> "$LOG"
 
-          # =====================================================
-          # Hostname
-          # =====================================================
+          # Give desktop startup applications time to settle
+          sleep 10
 
-          HOSTNAME_VALUE="$(hostname)"
-
-          log "Hostname=$HOSTNAME_VALUE"
-
-
-          # =====================================================
-          # Awareness URL
-          # =====================================================
-
-          AWARENESS_URL="${AWARENESS_BASE_URL}?host=${HOSTNAME_VALUE}"
-
-          log "Awareness URL=$AWARENESS_URL"
-
-
-          # =====================================================
+          # -------------------------------------------------
           # Check completion status
-          # =====================================================
+          # -------------------------------------------------
+          RESPONSE=$(curl -s \
+              --connect-timeout 2 \
+              --max-time 2 \
+              "$STATUS_URL")
 
-          log "Checking completion status..."
+          echo "$(date) : API response=$RESPONSE" >> "$LOG"
 
-
-          STATUS=$(
-              /usr/bin/curl \
-                  -sS \
-                  --connect-timeout 2 \
-                  --max-time 2 \
-                  "$BACKEND_BASE/status?hostname=$HOSTNAME_VALUE" \
-                  2>/dev/null
-          )
-
-          CURL_RESULT=$?
-
-
-          log "API curl result=$CURL_RESULT"
-          log "API response=$STATUS"
-
-
-          # =====================================================
-          # Backend unavailable
-          # =====================================================
-
-          if [ "$CURL_RESULT" -ne 0 ]; then
-
-              log "Backend unavailable."
-              log "Fail-open: kiosk will not start."
-
+          # Backend unavailable = fail open
+          if [ -z "$RESPONSE" ]; then
+              echo "$(date) : Backend unavailable - exiting" >> "$LOG"
               exit 0
-
           fi
 
-
-          # =====================================================
-          # Empty response
-          # =====================================================
-
-          if [ -z "$STATUS" ]; then
-
-              log "Empty API response."
-              log "Kiosk will not start."
-
+          # Already completed = don't open kiosk
+          if echo "$RESPONSE" | grep -q '"completed":true'; then
+              echo "$(date) : Awareness already completed" >> "$LOG"
               exit 0
-
           fi
 
-
-          # =====================================================
-          # Already completed
-          # =====================================================
-
-          if echo "$STATUS" | grep -q '"completed"[[:space:]]*:[[:space:]]*true'
-          then
-
-              log "Mock test already completed."
-              log "Firefox will NOT be opened."
-
-              exit 0
-
-          fi
-
-
-          # =====================================================
-          # Test not completed
-          # =====================================================
-
-          log "Mock test is NOT completed."
-          log "Firefox kiosk will start."
-
-
-          # =====================================================
-          # Find Firefox
-          # =====================================================
-
+          # -------------------------------------------------
+          # Launch Firefox
+          # -------------------------------------------------
           FIREFOX=""
 
           if [ -x "/usr/bin/firefox" ]; then
-
               FIREFOX="/usr/bin/firefox"
-
           elif [ -x "/snap/bin/firefox" ]; then
-
               FIREFOX="/snap/bin/firefox"
-
-          elif command -v firefox >/dev/null 2>&1; then
-
-              FIREFOX="$(command -v firefox)"
-
+          else
+              FIREFOX=$(command -v firefox 2>/dev/null)
           fi
-
 
           if [ -z "$FIREFOX" ]; then
-
-              log "ERROR: Firefox not found."
-
+              echo "$(date) : Firefox not found" >> "$LOG"
               exit 0
-
           fi
 
+          PROFILE="$HOME/.security-awareness-firefox"
 
-          log "Firefox=$FIREFOX"
+          mkdir -p "$PROFILE"
 
-
-          # =====================================================
-          # Create dedicated Firefox profile
-          # =====================================================
-
-          mkdir -p "$KIOSK_DIRECTORY"
-          mkdir -p "$FIREFOX_PROFILE"
-
-          rm -f "$FIREFOX_PROFILE/.parentlock" 2>/dev/null || true
-          rm -f "$FIREFOX_PROFILE/lock" 2>/dev/null || true
-
-
-          # =====================================================
-          # Launch Firefox
-          # =====================================================
-
-          log "Launching Firefox kiosk..."
+          echo "$(date) : Launching Firefox kiosk" >> "$LOG"
+          echo "$(date) : URL=$AWARENESS_URL" >> "$LOG"
 
           "$FIREFOX" \
               --no-remote \
-              --profile "$FIREFOX_PROFILE" \
+              --profile "$PROFILE" \
               --kiosk \
               "$AWARENESS_URL" \
-              >> "$LOG_FILE" 2>&1 &
-
+              >> "$LOG" 2>&1 &
 
           FIREFOX_PID=$!
 
-          log "Firefox PID=$FIREFOX_PID"
+          echo "$(date) : Firefox PID=$FIREFOX_PID" >> "$LOG"
 
-
-          # =====================================================
-          # Wait for Firefox
-          # =====================================================
-
-          sleep 3
-
-
-          if ! kill -0 "$FIREFOX_PID" 2>/dev/null
-          then
-
-              log "ERROR: Firefox exited immediately."
-
-              exit 1
-
-          fi
-
-
-          log "Firefox kiosk is running."
-
-
-          # =====================================================
+          # -------------------------------------------------
           # Monitor completion
-          # =====================================================
+          # -------------------------------------------------
+          while kill -0 "$FIREFOX_PID" 2>/dev/null; do
 
-          while kill -0 "$FIREFOX_PID" 2>/dev/null
-          do
+              sleep 2
 
-              sleep "$POLL_SECONDS"
+              RESPONSE=$(curl -s \
+                  --connect-timeout 2 \
+                  --max-time 2 \
+                  "$STATUS_URL")
 
+              echo "$(date) : Poll response=$RESPONSE" >> "$LOG"
 
-              STATUS=$(
-                  /usr/bin/curl \
-                      -sS \
-                      --connect-timeout 2 \
-                      --max-time 2 \
-                      "$BACKEND_BASE/status?hostname=$HOSTNAME_VALUE" \
-                      2>/dev/null
-              )
+              if echo "$RESPONSE" | grep -q '"completed":true'; then
 
-              CURL_RESULT=$?
+                  echo "$(date) : Test completed" >> "$LOG"
 
+                  # Keep score/result visible for 8 seconds
+                  sleep 8
 
-              if [ "$CURL_RESULT" -ne 0 ]; then
+                  echo "$(date) : Closing kiosk Firefox" >> "$LOG"
 
-                  log "Temporary API failure."
+                  kill "$FIREFOX_PID" 2>/dev/null || true
 
-                  continue
+                  sleep 3
 
-              fi
-
-
-              if [ -z "$STATUS" ]; then
-
-                  log "Empty API response."
-
-                  continue
-
-              fi
-
-
-              log "Status=$STATUS"
-
-
-              # =================================================
-              # Test completed
-              # =================================================
-
-              if echo "$STATUS" | grep -q '"completed"[[:space:]]*:[[:space:]]*true'
-              then
-
-                  log "=========================================="
-                  log "MOCK TEST COMPLETED"
-                  log "Showing result for 8 seconds"
-                  log "=========================================="
-
-
-                  sleep "$RESULT_WAIT_SECONDS"
-
-
-                  # =================================================
-                  # Close kiosk Firefox
-                  # =================================================
-
-                  if kill -0 "$FIREFOX_PID" 2>/dev/null
-                  then
-
-                      log "Closing kiosk Firefox."
-
-                      kill -TERM "$FIREFOX_PID" 2>/dev/null || true
-
-                  fi
-
-
-                  # =================================================
-                  # Wait for exit
-                  # =================================================
-
-                  for i in $(seq 1 10)
-                  do
-
-                      if ! kill -0 "$FIREFOX_PID" 2>/dev/null
-                      then
-                          break
-                      fi
-
-                      sleep 0.5
-
-                  done
-
-
-                  # =================================================
-                  # Force close if necessary
-                  # =================================================
-
-                  if kill -0 "$FIREFOX_PID" 2>/dev/null
-                  then
-
-                      log "Firefox still running."
-                      log "Force closing Firefox."
-
-                      kill -KILL "$FIREFOX_PID" 2>/dev/null || true
-
-                  fi
-
-
-                  # =================================================
-                  # Remove kiosk profile
-                  # =================================================
-
-                  rm -rf "$FIREFOX_PROFILE"
-
-                  log "Kiosk profile removed."
-                  log "Security Awareness Kiosk completed."
+                  kill -9 "$FIREFOX_PID" 2>/dev/null || true
 
                   break
-
               fi
 
           done
 
+          echo "$(date) : Kiosk finished" >> "$LOG"
 
-          log "Security Awareness launcher exiting."
-
-          exit 0
-
-
-    # =========================================================
-    # 3. Remove old systemd user service (leftover from earlier attempts)
-    # =========================================================
-
-    - name: Remove old systemd user service
-      ansible.builtin.file:
-        path: "/etc/systemd/user/security-awareness-kiosk.service"
-        state: absent
-
-
-    # =========================================================
-    # 4. Remove old system boot service (leftover from earlier attempts)
-    # =========================================================
-
-    - name: Remove old systemd system service
-      ansible.builtin.file:
-        path: "/etc/systemd/system/security-awareness-kiosk.service"
-        state: absent
-
-
-    # =========================================================
-    # 5. Reload systemd
-    # =========================================================
-
-    - name: Reload systemd
-      ansible.builtin.systemd:
-        daemon_reload: true
-
-
-    # =========================================================
-    # 6. Create XFCE/XDG autostart directory
-    # =========================================================
-
-    - name: Create XDG autostart directory
-      ansible.builtin.file:
-        path: "{{ autostart_directory }}"
-        state: directory
-        owner: root
-        group: root
-        mode: "0755"
-
-
-    # =========================================================
-    # 7. Create system-wide XFCE startup entry
-    # =========================================================
-
-    - name: Create Security Awareness XFCE startup entry
+    # ---------------------------------------------------------
+    # 4. Create system-wide GUI autostart
+    # ---------------------------------------------------------
+    - name: Create XDG autostart entry
       ansible.builtin.copy:
         dest: "{{ autostart_file }}"
         owner: root
         group: root
         mode: "0644"
-
         content: |
           [Desktop Entry]
           Type=Application
           Name=Security Awareness Kiosk
-          Comment=Launch Security Awareness Firefox Kiosk
-          Exec={{ launcher_path }}
+          Comment=Security Awareness Training
+          Exec={{ launcher }}
           Terminal=false
+          NoDisplay=false
           StartupNotify=false
           X-GNOME-Autostart-enabled=true
-          X-XFCE-Autostart-enabled=true
+          X-Cinnamon-Autostart-enabled=true
 
-
-    # =========================================================
-    # 8. Verify launcher
-    # =========================================================
-
-    - name: Verify launcher
+    # ---------------------------------------------------------
+    # 5. Configure automatic login for Linux Mint
+    # ---------------------------------------------------------
+    - name: Check LightDM configuration
       ansible.builtin.stat:
-        path: "{{ launcher_path }}"
-      register: launcher_status
+        path: /etc/lightdm/lightdm.conf
+      register: lightdm_conf
 
+    - name: Enable automatic login in LightDM
+      ansible.builtin.blockinfile:
+        path: /etc/lightdm/lightdm.conf
+        marker: "# {mark} ANSIBLE SECURITY AWARENESS AUTOLOGIN"
+        block: |
+          [Seat:*]
+          autologin-user={{ kiosk_user }}
+          autologin-user-timeout=0
+      when: lightdm_conf.stat.exists
 
-    # =========================================================
-    # 9. Verify autostart entry
-    # =========================================================
+    # ---------------------------------------------------------
+    # 6. Ensure ownership
+    # ---------------------------------------------------------
+    - name: Ensure kiosk home ownership
+      ansible.builtin.file:
+        path: "{{ kiosk_home }}"
+        owner: "{{ kiosk_user }}"
+        group: "{{ kiosk_user }}"
+        recurse: false
 
-    - name: Verify autostart entry
-      ansible.builtin.stat:
-        path: "{{ autostart_file }}"
-      register: autostart_status
+    # ---------------------------------------------------------
+    # 7. Remove old systemd kiosk services
+    # ---------------------------------------------------------
+    - name: Remove old user systemd service
+      ansible.builtin.file:
+        path: /etc/systemd/user/security-awareness-kiosk.service
+        state: absent
 
+    - name: Remove old system systemd service
+      ansible.builtin.file:
+        path: /etc/systemd/system/security-awareness-kiosk.service
+        state: absent
 
-    # =========================================================
-    # 10. Check Firefox
-    # =========================================================
-
-    - name: Check Firefox
-      ansible.builtin.shell:
-        cmd: |
-          if [ -x /usr/bin/firefox ]; then
-              echo "/usr/bin/firefox"
-          elif [ -x /snap/bin/firefox ]; then
-              echo "/snap/bin/firefox"
-          elif command -v firefox >/dev/null 2>&1; then
-              command -v firefox
-          else
-              exit 1
-          fi
-
-      register: firefox_check
-      changed_when: false
-      failed_when: false
-
-
-    # =========================================================
-    # 11. Check curl
-    # =========================================================
-
-    - name: Check curl
-      ansible.builtin.command:
-        cmd: /usr/bin/curl --version
-      register: curl_check
-      changed_when: false
-      failed_when: false
-
-
-    # =========================================================
-    # 12. Final result
-    # =========================================================
-
-    - name: Display deployment result
-      ansible.builtin.debug:
-        msg:
-          - "=========================================="
-          - "Security Awareness XFCE Startup"
-          - "=========================================="
-          - "Launcher exists: {{ launcher_status.stat.exists }}"
-          - "Autostart exists: {{ autostart_status.stat.exists }}"
-          - "Firefox: {{ firefox_check.stdout | default('NOT FOUND') }}"
-          - "Curl installed: {{ curl_check.rc == 0 }}"
-          - "Launcher: {{ launcher_path }}"
-          - "Autostart: {{ autostart_file }}"
-          - "Backend: {{ backend_base }}"
-          - "Awareness URL: {{ awareness_base_url }}"
-          - "Startup delay: 2 seconds"
-          - "API polling: 2 seconds"
-          - "API timeout: 2 seconds"
-          - "Result display: 8 seconds"
-          - "Log: /tmp/security-awareness-kiosk.log"
-          - "=========================================="
+    # ---------------------------------------------------------
+    # 8. Reboot
+    # ---------------------------------------------------------
+    - name: Reboot machine
+      ansible.builtin.reboot:
+        reboot_timeout: 300
+        post_reboot_delay: 10
