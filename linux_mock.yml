@@ -5,6 +5,7 @@
   gather_facts: false
 
   vars:
+
     # =========================================================
     # Application paths
     # =========================================================
@@ -12,7 +13,7 @@
     launcher_directory: "/opt/security-awareness"
     launcher_path: "/opt/security-awareness/kiosk-launcher-linux.sh"
 
-    # Old XFCE autostart file
+    # Old XFCE/XDG autostart
     autostart_directory: "/etc/xdg/autostart"
     autostart_file: "/etc/xdg/autostart/security-awareness-kiosk.desktop"
 
@@ -26,6 +27,7 @@
 
     backend_base: "http://172.17.6.142:5000/api/awareness"
     awareness_base_url: "http://172.17.6.142:5000/awareness.html"
+
 
   tasks:
 
@@ -52,6 +54,7 @@
         owner: root
         group: root
         mode: "0755"
+
         content: |
           #!/bin/bash
 
@@ -75,7 +78,7 @@
           KIOSK_DIRECTORY="$HOME/.security-awareness"
           FIREFOX_PROFILE="$KIOSK_DIRECTORY/firefox-kiosk-profile"
 
-          # Make sure standard commands are available
+          # Standard PATH
           export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 
@@ -100,7 +103,7 @@
 
 
           # =====================================================
-          # Wait for graphical session
+          # Wait for graphical environment
           # =====================================================
 
           if [ -z "$DISPLAY" ] && [ -z "$WAYLAND_DISPLAY" ]; then
@@ -120,8 +123,11 @@
 
 
           if [ -z "$DISPLAY" ] && [ -z "$WAYLAND_DISPLAY" ]; then
+
               log "ERROR: No graphical display available."
+
               exit 0
+
           fi
 
 
@@ -129,7 +135,7 @@
 
 
           # =====================================================
-          # Prepare kiosk directories
+          # Create kiosk directories
           # =====================================================
 
           mkdir -p "$KIOSK_DIRECTORY"
@@ -155,7 +161,7 @@
 
 
           # =====================================================
-          # Check backend BEFORE opening Firefox
+          # Check completion BEFORE opening Firefox
           # =====================================================
 
           log "Checking completion status..."
@@ -170,6 +176,7 @@
 
           CURL_RESULT=$?
 
+
           log "API curl result=$CURL_RESULT"
           log "API response=$STATUS"
 
@@ -181,9 +188,10 @@
           if [ "$CURL_RESULT" -ne 0 ]; then
 
               log "Backend unavailable."
-              log "Fail-open: Firefox kiosk will not be launched."
+              log "Fail-open: Firefox kiosk will NOT be launched."
 
               exit 0
+
           fi
 
 
@@ -198,11 +206,12 @@
               log "Firefox kiosk will NOT be opened."
 
               exit 0
+
           fi
 
 
           log "Mock test is NOT completed."
-          log "Firefox kiosk will be started."
+          log "Starting Firefox kiosk."
 
 
           # =====================================================
@@ -231,6 +240,7 @@
               log "ERROR: Firefox not found."
 
               exit 1
+
           fi
 
 
@@ -265,7 +275,7 @@
 
 
           # =====================================================
-          # Small startup wait
+          # Allow Firefox to initialize
           # =====================================================
 
           sleep 1
@@ -281,6 +291,7 @@
               log "ERROR: Firefox exited immediately."
 
               exit 1
+
           fi
 
 
@@ -298,9 +309,9 @@
               sleep "$POLL_SECONDS"
 
 
-              # -------------------------------------------------
+              # =================================================
               # Query backend
-              # -------------------------------------------------
+              # =================================================
 
               STATUS=$(
                   /usr/bin/curl -sS \
@@ -313,15 +324,16 @@
               CURL_RESULT=$?
 
 
-              # -------------------------------------------------
+              # =================================================
               # Temporary backend/network failure
-              # -------------------------------------------------
+              # =================================================
 
               if [ "$CURL_RESULT" -ne 0 ]; then
 
                   log "Temporary API failure."
 
                   continue
+
               fi
 
 
@@ -349,14 +361,16 @@
 
 
                   # ------------------------------------------------
-                  # Close ONLY this Firefox instance
+                  # Close ONLY kiosk Firefox
                   # ------------------------------------------------
 
                   log "Closing kiosk Firefox PID=$FIREFOX_PID"
 
                   if kill -0 "$FIREFOX_PID" 2>/dev/null
                   then
+
                       kill -TERM "$FIREFOX_PID" 2>/dev/null || true
+
                   fi
 
 
@@ -417,17 +431,17 @@
 
 
     # =========================================================
-    # 3. Remove old XFCE / XDG autostart entry
+    # 3. Remove old XFCE/XDG autostart entry
     # =========================================================
 
-    - name: Remove old autostart entry
+    - name: Remove old autostart entry if present
       ansible.builtin.file:
         path: "{{ autostart_file }}"
         state: absent
 
 
     # =========================================================
-    # 4. Ensure systemd user directory exists
+    # 4. Create systemd user service directory
     # =========================================================
 
     - name: Ensure systemd user directory exists
@@ -449,6 +463,7 @@
         owner: root
         group: root
         mode: "0644"
+
         content: |
           [Unit]
           Description=Security Awareness Kiosk Launcher
@@ -459,13 +474,13 @@
           [Service]
           Type=simple
 
-          # Run the kiosk launcher
+          # Security Awareness launcher
           ExecStart={{ launcher_path }}
 
-          # Do not restart after successful completion
+          # Do not restart after launcher exits
           Restart=no
 
-          # Allow enough time for GUI initialization
+          # Allow GUI initialization
           TimeoutStartSec=30
 
           [Install]
@@ -473,17 +488,11 @@
 
 
     # =========================================================
-    # 6. Reload systemd user units globally
-    # =========================================================
-
-    - name: Reload global systemd user units
-      ansible.builtin.command:
-        cmd: systemctl --global daemon-reload
-      changed_when: false
-
-
-    # =========================================================
-    # 7. Enable service globally for all users
+    # 6. Enable systemd user service globally
+    #
+    # IMPORTANT:
+    # systemctl --global daemon-reload is NOT valid.
+    # Therefore we only use --global enable here.
     # =========================================================
 
     - name: Enable Security Awareness kiosk service globally
@@ -493,6 +502,18 @@
       changed_when: >
         'Created symlink' in systemd_enable_result.stdout or
         'Created symlink' in systemd_enable_result.stderr
+
+
+    # =========================================================
+    # 7. Verify global systemd user service
+    # =========================================================
+
+    - name: Verify global systemd user service
+      ansible.builtin.command:
+        cmd: systemctl --global is-enabled security-awareness-kiosk.service
+      register: systemd_enabled_status
+      changed_when: false
+      failed_when: false
 
 
     # =========================================================
@@ -506,10 +527,10 @@
 
 
     # =========================================================
-    # 9. Verify systemd service
+    # 9. Verify systemd service file
     # =========================================================
 
-    - name: Verify systemd service
+    - name: Verify systemd service file
       ansible.builtin.stat:
         path: "{{ systemd_service_file }}"
       register: systemd_service_status
@@ -541,6 +562,7 @@
           else
               exit 1
           fi
+
       register: firefox_check
       changed_when: false
       failed_when: false
@@ -570,6 +592,7 @@
           - "=========================================="
           - "Launcher exists: {{ launcher_status.stat.exists }}"
           - "Systemd service exists: {{ systemd_service_status.stat.exists }}"
+          - "Systemd enabled: {{ systemd_enabled_status.stdout | default('unknown') }}"
           - "Old autostart exists: {{ old_autostart_status.stat.exists }}"
           - "Firefox: {{ firefox_check.stdout | default('NOT FOUND') }}"
           - "Curl installed: {{ curl_check.rc == 0 }}"
