@@ -33,18 +33,27 @@
       Write-Log "User=$env:USERNAME"
       Write-Log '=========================================='
 
-      # --- Wait for the desktop shell (explorer.exe) ---
-      Write-Log 'Waiting for explorer.exe...'
+      # --- Wait for an active interactive session ---
+      # (Not checking for explorer.exe specifically — some machines
+      # use a custom shell instead of the standard desktop, so we
+      # check for any active console/RDP session instead.)
+      Write-Log 'Waiting for an active user session...'
       $Count = 0
-      while (-not (Get-Process explorer -ErrorAction SilentlyContinue) -and $Count -lt 60) {
-          Start-Sleep -Seconds 1
-          $Count++
+      $SessionActive = $false
+      while (-not $SessionActive -and $Count -lt 60) {
+          $QuserOutput = quser 2>$null
+          if ($QuserOutput -match 'Active') {
+              $SessionActive = $true
+          } else {
+              Start-Sleep -Seconds 1
+              $Count++
+          }
       }
-      if (-not (Get-Process explorer -ErrorAction SilentlyContinue)) {
-          Write-Log 'ERROR: explorer.exe not found.'
+      if (-not $SessionActive) {
+          Write-Log 'ERROR: No active session detected after 60 seconds.'
           exit 0
       }
-      Write-Log 'explorer.exe detected.'
+      Write-Log "Active session detected (waited $Count seconds)."
 
       # --- Machine identity ---
       $Hostname = $env:COMPUTERNAME
@@ -223,10 +232,11 @@
 
     - name: Create Security Awareness boot task (fires once, first interactive user)
       ansible.builtin.raw: >-
-        schtasks.exe /Create /TN "{{ scheduled_task_name }}" /SC ONSTART
-        /RU "BUILTIN\Users" /IT
-        /TR "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"{{ launcher_path }}\""
-        /F
+        powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command
+        "$Action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File {{ launcher_path }}';
+        $Trigger = New-ScheduledTaskTrigger -AtStartup;
+        $Principal = New-ScheduledTaskPrincipal -GroupId 'BUILTIN\Users' -RunLevel Limited -LogonType Group;
+        Register-ScheduledTask -TaskName '{{ scheduled_task_name }}' -Action $Action -Trigger $Trigger -Principal $Principal -Force | Out-Null"
 
     # --- Fallback (fires at every logon, but harmless due to the
     #     completion check inside the script) — uncomment if the
