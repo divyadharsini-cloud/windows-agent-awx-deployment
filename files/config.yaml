@@ -1,8 +1,13 @@
+# ============================================
+# AuroSphere Windows Agent - Patch Enabled
+# ============================================
+
 agent:
   name: "windows-agent-patch"
   log_file: "C:\\ProgramData\\windows-agent-patch\\logs\\agent.log"
   marker_file: "C:\\ProgramData\\windows-agent-patch\\.installed"
 
+# PatchConsole API
 api_url: "http://172.17.6.142:5000"
 
 intervals:
