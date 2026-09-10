@@ -4,9 +4,6 @@
   gather_facts: false
 
   vars:
-    # ============================================
-    # New AuroSphere Patch Agent
-    # ============================================
 
     agent_install_dir: 'C:\Program Files\CustomAgent\windows-agent-patch'
     agent_exe: 'C:\Program Files\CustomAgent\windows-agent-patch\windows-agent-patch.exe'
@@ -15,26 +12,22 @@
     agent_log_dir: 'C:\ProgramData\windows-agent-patch\logs'
     agent_config: 'C:\ProgramData\windows-agent-patch\config.yaml'
 
-    # AuroSphere tray
     tray_exe: 'C:\Program Files\CustomAgent\windows-agent-patch\aurosphere-tray.exe'
     assets_dir: 'C:\Program Files\CustomAgent\windows-agent-patch\assets'
     logo_file: 'C:\Program Files\CustomAgent\windows-agent-patch\assets\aurosphere.ico'
 
-    # Patch directories
     agent_patch_dir: 'C:\ProgramData\windows-agent-patch\patch'
     agent_patch_download_dir: 'C:\ProgramData\windows-agent-patch\patch\downloads'
 
-    # New service
     agent_service_name: 'windows-agent-patch'
     agent_display_name: 'Windows Custom Agent'
 
-    # Old service
     old_agent_service_name: 'windows-agent'
 
   tasks:
 
     # ============================================
-    # 1. Stop OLD agent
+    # 1. Stop old agent
     # ============================================
 
     - name: Stop old Windows Agent service
@@ -44,10 +37,20 @@
       failed_when: false
 
     # ============================================
-    # 2. Create NEW directories
+    # 2. Stop new agent before replacing files
     # ============================================
 
-    - name: Create AuroSphere agent installation directory
+    - name: Stop existing AuroSphere agent service
+      ansible.windows.win_service:
+        name: "{{ agent_service_name }}"
+        state: stopped
+      failed_when: false
+
+    # ============================================
+    # 3. Create directories
+    # ============================================
+
+    - name: Create AuroSphere installation directory
       ansible.windows.win_file:
         path: "{{ agent_install_dir }}"
         state: directory
@@ -57,12 +60,12 @@
         path: "{{ assets_dir }}"
         state: directory
 
-    - name: Create agent ProgramData directory
+    - name: Create AuroSphere ProgramData directory
       ansible.windows.win_file:
         path: "{{ agent_data_dir }}"
         state: directory
 
-    - name: Create agent log directory
+    - name: Create AuroSphere log directory
       ansible.windows.win_file:
         path: "{{ agent_log_dir }}"
         state: directory
@@ -78,7 +81,7 @@
         state: directory
 
     # ============================================
-    # 3. Copy NEW agent
+    # 4. Copy agent
     # ============================================
 
     - name: Copy AuroSphere patch agent executable
@@ -88,7 +91,7 @@
         force: true
 
     # ============================================
-    # 4. Copy configuration
+    # 5. Copy config
     # ============================================
 
     - name: Copy AuroSphere agent configuration
@@ -98,7 +101,26 @@
         force: true
 
     # ============================================
-    # 5. Copy AuroSphere tray
+    # 6. Verify config contains PatchConsole URL
+    # ============================================
+
+    - name: Verify PatchConsole check-in URL
+      ansible.windows.win_shell: |
+        $config = Get-Content "{{ agent_config }}" -Raw
+
+        if ($config -match 'api_url:\s*"http://172\.17\.6\.142:5000/api/v1/agents/checkin"') {
+            Write-Output "SUCCESS: PatchConsole check-in URL configured"
+            exit 0
+        }
+        else {
+            Write-Error "ERROR: PatchConsole check-in URL is missing"
+            exit 1
+        }
+      register: checkin_config_check
+      changed_when: false
+
+    # ============================================
+    # 7. Copy tray
     # ============================================
 
     - name: Copy AuroSphere tray executable
@@ -114,10 +136,10 @@
         force: true
 
     # ============================================
-    # 6. Configure AuroSphere tray startup
+    # 8. Configure tray startup
     # ============================================
 
-    - name: Configure AuroSphere tray to start at user logon
+    - name: Configure AuroSphere tray startup
       ansible.windows.win_regedit:
         path: 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run'
         name: 'AuroSphere Agent'
@@ -125,21 +147,29 @@
         type: string
 
     # ============================================
-    # 7. Install / update NEW Windows service
+    # 9. Install / configure service
     # ============================================
 
-    - name: Install and start AuroSphere patch agent service
+    - name: Configure AuroSphere Windows service
       ansible.windows.win_service:
         name: "{{ agent_service_name }}"
         display_name: "{{ agent_display_name }}"
         description: "AuroSphere Windows Agent - Patch Enabled"
         path: '"{{ agent_exe }}"'
         start_mode: auto
-        state: started
         username: LocalSystem
 
     # ============================================
-    # 8. Verify NEW service
+    # 10. Start agent with new configuration
+    # ============================================
+
+    - name: Start AuroSphere patch agent
+      ansible.windows.win_service:
+        name: "{{ agent_service_name }}"
+        state: started
+
+    # ============================================
+    # 11. Verify service
     # ============================================
 
     - name: Verify AuroSphere patch agent service
@@ -148,7 +178,7 @@
       register: agent_service
 
     # ============================================
-    # 9. Verify files
+    # 12. Verify files
     # ============================================
 
     - name: Verify AuroSphere agent executable
@@ -161,7 +191,7 @@
         path: "{{ agent_config }}"
       register: agent_config_check
 
-    - name: Verify AuroSphere tray executable
+    - name: Verify AuroSphere tray
       ansible.windows.win_stat:
         path: "{{ tray_exe }}"
       register: tray_exe_check
@@ -172,18 +202,18 @@
       register: logo_check
 
     # ============================================
-    # 10. Verify NEW process
+    # 13. Verify process
     # ============================================
 
     - name: Verify AuroSphere agent process
       ansible.windows.win_shell: |
         Get-Process -Name "windows-agent-patch" -ErrorAction SilentlyContinue |
-        Select-Object Id, ProcessName, Path
+        Select-Object Id, ProcessName, Path, StartTime
       register: agent_process
       changed_when: false
 
     # ============================================
-    # 11. Verify OLD service is stopped
+    # 14. Verify old service
     # ============================================
 
     - name: Verify old Windows Agent service is stopped
@@ -193,7 +223,7 @@
       failed_when: false
 
     # ============================================
-    # 12. Final result
+    # 15. Final result
     # ============================================
 
     - name: Display deployment result
@@ -210,5 +240,6 @@
           - "Config exists      : {{ agent_config_check.stat.exists }}"
           - "Tray exists        : {{ tray_exe_check.stat.exists }}"
           - "Logo exists        : {{ logo_check.stat.exists }}"
+          - "Check-in config    : {{ checkin_config_check.stdout_lines }}"
           - "Agent process      : {{ agent_process.stdout_lines }}"
           - "=========================================="
