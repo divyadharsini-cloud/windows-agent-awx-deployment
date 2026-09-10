@@ -1,11 +1,9 @@
-# ============================================
-# AuroSphere Windows Agent - Patch Enabled
-# ============================================
-
 agent:
   name: "windows-agent-patch"
   log_file: "C:\\ProgramData\\windows-agent-patch\\logs\\agent.log"
   marker_file: "C:\\ProgramData\\windows-agent-patch\\.installed"
+
+api_url: "http://172.17.6.142:5000"
 
 intervals:
   heartbeat_seconds: 60
@@ -33,7 +31,7 @@ awx:
 firefox:
   cache_cleanup_enabled: true
   policies_path: "C:\\Program Files\\Mozilla Firefox\\distribution\\policies.json"
-  homepage_url: "eyenotes.aravind.org/eyenotes"
+  homepage_url: "https://vcemr.aravind.org/vcemr"
 
 patch:
   enabled: true
