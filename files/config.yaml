@@ -7,18 +7,27 @@ agent:
   log_file: "C:\\ProgramData\\windows-agent-patch\\logs\\agent.log"
   marker_file: "C:\\ProgramData\\windows-agent-patch\\.installed"
 
-# PatchConsole API
-api_url: "http://172.17.6.142:5000"
+# ============================================
+# Agent intervals
+# ============================================
 
 intervals:
   heartbeat_seconds: 60
   asset_collect_seconds: 3600
   patch_check_seconds: 21600
 
+# ============================================
+# Prometheus metrics
+# ============================================
+
 metrics:
   enabled: true
   port: 9888
   path: "/metrics"
+
+# ============================================
+# Agent modules
+# ============================================
 
 modules:
   heartbeat: true
@@ -28,24 +37,53 @@ modules:
   onetime_setup: true
   checkin: true
 
+# ============================================
+# PatchConsole API check-in
+# ============================================
+
+checkin:
+  api_url: "http://172.17.6.142:5000/api/v1/agents/checkin"
+  interval_seconds: 300
+
+# ============================================
+# AWX reporting
+# ============================================
+
 awx:
   server: "https://awx.aravind.org"
   user: "divya"
   password_env_var: "AWX_PASSWORD"
+
+# ============================================
+# Firefox configuration
+# ============================================
 
 firefox:
   cache_cleanup_enabled: true
   policies_path: "C:\\Program Files\\Mozilla Firefox\\distribution\\policies.json"
   homepage_url: "https://vcemr.aravind.org/vcemr"
 
+# ============================================
+# AuroSphere Patch Management Engine
+# ============================================
+
 patch:
   enabled: true
   interval_seconds: 21600
+
   master_url: "http://172.17.9.50:8443"
+
   token_env: "PATCH_AGENT_TOKEN"
+
   data_dir: "C:\\ProgramData\\windows-agent-patch\\patch"
   download_dir: "C:\\ProgramData\\windows-agent-patch\\patch\\downloads"
   history_file: "C:\\ProgramData\\windows-agent-patch\\patch\\history.json"
+
   http_timeout_seconds: 60
+
+  # Do not automatically install patches.
+  # Agent waits for approved deployment.
   auto_install: false
+
+  # Do not automatically reboot.
   auto_reboot: false
