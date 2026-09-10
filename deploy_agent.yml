@@ -1,34 +1,61 @@
 ---
-- name: Deploy and start Windows Custom Agent
+- name: Deploy AuroSphere Windows Agent - Patch Enabled
   hosts: DPDYVCBGCON0354
   gather_facts: false
 
   vars:
-    agent_install_dir: 'C:\Program Files\CustomAgent\windows-agent-new\windows-agent'
-    agent_exe: 'C:\Program Files\CustomAgent\windows-agent-new\windows-agent\custom-agent.exe'
+    # ============================================
+    # New AuroSphere Patch Agent
+    # ============================================
 
-    agent_data_dir: 'C:\ProgramData\windows-agent'
-    agent_log_dir: 'C:\ProgramData\windows-agent\logs'
-    agent_config: 'C:\ProgramData\windows-agent\config.yaml'
+    agent_install_dir: 'C:\Program Files\CustomAgent\windows-agent-patch'
+    agent_exe: 'C:\Program Files\CustomAgent\windows-agent-patch\windows-agent-patch.exe'
 
-    agent_patch_dir: 'C:\ProgramData\windows-agent\patch'
-    agent_patch_download_dir: 'C:\ProgramData\windows-agent\patch\downloads'
+    agent_data_dir: 'C:\ProgramData\windows-agent-patch'
+    agent_log_dir: 'C:\ProgramData\windows-agent-patch\logs'
+    agent_config: 'C:\ProgramData\windows-agent-patch\config.yaml'
 
-    agent_service_name: 'windows-agent'
+    # AuroSphere tray
+    tray_exe: 'C:\Program Files\CustomAgent\windows-agent-patch\aurosphere-tray.exe'
+    assets_dir: 'C:\Program Files\CustomAgent\windows-agent-patch\assets'
+    logo_file: 'C:\Program Files\CustomAgent\windows-agent-patch\assets\aurosphere.ico'
+
+    # Patch directories
+    agent_patch_dir: 'C:\ProgramData\windows-agent-patch\patch'
+    agent_patch_download_dir: 'C:\ProgramData\windows-agent-patch\patch\downloads'
+
+    # New service
+    agent_service_name: 'windows-agent-patch'
     agent_display_name: 'Windows Custom Agent'
+
+    # Old service
+    old_agent_service_name: 'windows-agent'
 
   tasks:
 
-    - name: Create agent installation directory
+    # ============================================
+    # 1. Stop OLD agent
+    # ============================================
+
+    - name: Stop old Windows Agent service
+      ansible.windows.win_service:
+        name: "{{ old_agent_service_name }}"
+        state: stopped
+      failed_when: false
+
+    # ============================================
+    # 2. Create NEW directories
+    # ============================================
+
+    - name: Create AuroSphere agent installation directory
       ansible.windows.win_file:
         path: "{{ agent_install_dir }}"
         state: directory
 
-    - name: Copy Windows Agent executable
-      ansible.windows.win_copy:
-        src: custom-agent.exe
-        dest: "{{ agent_exe }}"
-        force: true
+    - name: Create AuroSphere assets directory
+      ansible.windows.win_file:
+        path: "{{ assets_dir }}"
+        state: directory
 
     - name: Create agent ProgramData directory
       ansible.windows.win_file:
@@ -50,54 +77,138 @@
         path: "{{ agent_patch_download_dir }}"
         state: directory
 
-    - name: Copy agent configuration
+    # ============================================
+    # 3. Copy NEW agent
+    # ============================================
+
+    - name: Copy AuroSphere patch agent executable
+      ansible.windows.win_copy:
+        src: windows-agent-patch.exe
+        dest: "{{ agent_exe }}"
+        force: true
+
+    # ============================================
+    # 4. Copy configuration
+    # ============================================
+
+    - name: Copy AuroSphere agent configuration
       ansible.windows.win_copy:
         src: config.yaml
         dest: "{{ agent_config }}"
         force: true
 
-    - name: Install and start Windows Agent service
+    # ============================================
+    # 5. Copy AuroSphere tray
+    # ============================================
+
+    - name: Copy AuroSphere tray executable
+      ansible.windows.win_copy:
+        src: aurosphere-tray.exe
+        dest: "{{ tray_exe }}"
+        force: true
+
+    - name: Copy AuroSphere logo
+      ansible.windows.win_copy:
+        src: aurosphere.ico
+        dest: "{{ logo_file }}"
+        force: true
+
+    # ============================================
+    # 6. Configure AuroSphere tray startup
+    # ============================================
+
+    - name: Configure AuroSphere tray to start at user logon
+      ansible.windows.win_regedit:
+        path: 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run'
+        name: 'AuroSphere Agent'
+        data: '"{{ tray_exe }}"'
+        type: string
+
+    # ============================================
+    # 7. Install / update NEW Windows service
+    # ============================================
+
+    - name: Install and start AuroSphere patch agent service
       ansible.windows.win_service:
         name: "{{ agent_service_name }}"
         display_name: "{{ agent_display_name }}"
-        description: "Windows Custom Agent"
+        description: "AuroSphere Windows Agent - Patch Enabled"
         path: '"{{ agent_exe }}"'
         start_mode: auto
         state: started
         username: LocalSystem
 
-    - name: Verify Windows Agent service
+    # ============================================
+    # 8. Verify NEW service
+    # ============================================
+
+    - name: Verify AuroSphere patch agent service
       ansible.windows.win_service:
         name: "{{ agent_service_name }}"
       register: agent_service
 
-    - name: Verify Windows Agent executable
+    # ============================================
+    # 9. Verify files
+    # ============================================
+
+    - name: Verify AuroSphere agent executable
       ansible.windows.win_stat:
         path: "{{ agent_exe }}"
       register: agent_exe_check
 
-    - name: Verify agent configuration
+    - name: Verify AuroSphere configuration
       ansible.windows.win_stat:
         path: "{{ agent_config }}"
       register: agent_config_check
 
-    - name: Verify agent process
+    - name: Verify AuroSphere tray executable
+      ansible.windows.win_stat:
+        path: "{{ tray_exe }}"
+      register: tray_exe_check
+
+    - name: Verify AuroSphere logo
+      ansible.windows.win_stat:
+        path: "{{ logo_file }}"
+      register: logo_check
+
+    # ============================================
+    # 10. Verify NEW process
+    # ============================================
+
+    - name: Verify AuroSphere agent process
       ansible.windows.win_shell: |
-        Get-Process -Name "custom-agent" -ErrorAction SilentlyContinue |
+        Get-Process -Name "windows-agent-patch" -ErrorAction SilentlyContinue |
         Select-Object Id, ProcessName, Path
       register: agent_process
       changed_when: false
+
+    # ============================================
+    # 11. Verify OLD service is stopped
+    # ============================================
+
+    - name: Verify old Windows Agent service is stopped
+      ansible.windows.win_service:
+        name: "{{ old_agent_service_name }}"
+      register: old_agent_service
+      failed_when: false
+
+    # ============================================
+    # 12. Final result
+    # ============================================
 
     - name: Display deployment result
       ansible.builtin.debug:
         msg:
           - "=========================================="
-          - "Windows Agent Deployment Result"
+          - "AuroSphere Agent Deployment Result"
           - "=========================================="
-          - "Executable exists : {{ agent_exe_check.stat.exists }}"
-          - "Config exists     : {{ agent_config_check.stat.exists }}"
-          - "Service name      : {{ agent_service.name }}"
-          - "Service state     : {{ agent_service.state }}"
-          - "Start mode        : {{ agent_service.start_mode }}"
-          - "Agent process     : {{ agent_process.stdout_lines }}"
+          - "Old service        : {{ old_agent_service.state | default('not found') }}"
+          - "New service        : {{ agent_service.name }}"
+          - "New service state  : {{ agent_service.state }}"
+          - "Start mode         : {{ agent_service.start_mode }}"
+          - "Agent EXE exists   : {{ agent_exe_check.stat.exists }}"
+          - "Config exists      : {{ agent_config_check.stat.exists }}"
+          - "Tray exists        : {{ tray_exe_check.stat.exists }}"
+          - "Logo exists        : {{ logo_check.stat.exists }}"
+          - "Agent process      : {{ agent_process.stdout_lines }}"
           - "=========================================="
