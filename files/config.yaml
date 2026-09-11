@@ -69,7 +69,7 @@ firefox:
 
 patch:
   enabled: true
-  interval_seconds: 21600
+  interval_seconds: 300
 
   master_url: "http://172.17.9.50:8443"
 
@@ -83,7 +83,7 @@ patch:
 
   # Do not automatically install patches.
   # Agent waits for approved deployment.
-  auto_install: false
+  auto_install: true
 
   # Do not automatically reboot.
   auto_reboot: false
