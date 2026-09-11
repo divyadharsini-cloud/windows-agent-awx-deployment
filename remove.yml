@@ -1,5 +1,5 @@
 ---
-- name: Remove AuroSphere Patch Agent EXE
+- name: Remove old AuroSphere Patch Agent
   hosts: DPDYPHGFDAY0536
   gather_facts: false
 
@@ -14,16 +14,28 @@
         state: stopped
       failed_when: false
 
-    - name: Remove old AuroSphere patch agent EXE
+    - name: Kill remaining AuroSphere patch process
+      ansible.windows.win_shell: |
+        Get-Process -Name "windows-agent-patch" -ErrorAction SilentlyContinue |
+          Stop-Process -Force -ErrorAction SilentlyContinue
+      changed_when: false
+
+    - name: Delete AuroSphere patch service
+      ansible.windows.win_service:
+        name: windows-agent-patch
+        state: absent
+      failed_when: false
+
+    - name: Remove old AuroSphere patch agent executable
       ansible.windows.win_file:
         path: "{{ agent_exe }}"
         state: absent
 
-    - name: Verify old EXE removed
+    - name: Verify old executable is removed
       ansible.windows.win_stat:
         path: "{{ agent_exe }}"
       register: exe_check
 
-    - name: Display result
+    - name: Show removal result
       ansible.builtin.debug:
-        msg: "Old AuroSphere patch EXE exists: {{ exe_check.stat.exists }}"
+        msg: "AuroSphere patch agent EXE exists: {{ exe_check.stat.exists }}"
