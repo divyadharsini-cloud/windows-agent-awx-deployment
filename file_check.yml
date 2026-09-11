@@ -1,14 +1,71 @@
-- name: Check patch download
+---
+- name: AuroSphere Patch Agent Diagnostic
   hosts: DPDYPHGFDAY0536
   gather_facts: false
 
   tasks:
-    - name: Check downloaded patch files
+
+    - name: Check AuroSphere patch service
+      ansible.windows.win_service:
+        name: windows-agent-patch
+      register: patch_service
+
+    - name: Check patch agent process
       ansible.windows.win_shell: |
-        Get-ChildItem "C:\ProgramData\windows-agent-patch\patch\downloads" -Force |
-        Select-Object Name, Length, LastWriteTime
-      register: result
+        Get-Process -Name "windows-agent-patch" -ErrorAction SilentlyContinue |
+          Select-Object Id, ProcessName, Path, StartTime |
+          Format-List
+      register: patch_process
       changed_when: false
 
-    - debug:
-        var: result.stdout_lines
+    - name: Read latest patch agent log
+      ansible.windows.win_shell: |
+        $log = "C:\ProgramData\windows-agent-patch\logs\agent.log"
+
+        if (Test-Path $log) {
+            Get-Content $log -Tail 100
+        }
+        else {
+            Write-Output "LOG_NOT_FOUND: $log"
+        }
+      register: patch_log
+      changed_when: false
+
+    - name: Check patch download directory
+      ansible.windows.win_shell: |
+        $dir = "C:\ProgramData\windows-agent-patch\patch\downloads"
+
+        if (Test-Path $dir) {
+            Get-ChildItem $dir -Force |
+              Select-Object Name, Length, LastWriteTime |
+              Format-Table -AutoSize
+        }
+        else {
+            Write-Output "DOWNLOAD_DIRECTORY_NOT_FOUND: $dir"
+        }
+      register: downloads
+      changed_when: false
+
+    - name: Check PatchMaster connectivity
+      ansible.windows.win_shell: |
+        Test-NetConnection 172.17.9.50 -Port 8443 |
+          Select-Object ComputerName, RemotePort, TcpTestSucceeded
+      register: patchmaster_connection
+      changed_when: false
+
+    - name: Check API connectivity
+      ansible.windows.win_shell: |
+        Test-NetConnection 172.17.6.142 -Port 5000 |
+          Select-Object ComputerName, RemotePort, TcpTestSucceeded
+      register: api_connection
+      changed_when: false
+
+    - name: Show diagnostic result
+      ansible.builtin.debug:
+        msg:
+          service: "{{ patch_service }}"
+          process: "{{ patch_process.stdout }}"
+          log: "{{ patch_log.stdout }}"
+          downloads: "{{ downloads.stdout }}"
+          patchmaster: "{{ patchmaster_connection.stdout }}"
+          api: "{{ api_connection.stdout }}"
