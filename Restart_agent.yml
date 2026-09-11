@@ -1,0 +1,22 @@
+---
+- name: Restart AuroSphere Patch Agent
+  hosts: DPDYPHGFDAY0536
+  gather_facts: false
+
+  tasks:
+    - name: Restart AuroSphere patch agent
+      ansible.windows.win_service:
+        name: windows-agent-patch
+        state: restarted
+
+    - name: Check AuroSphere patch agent
+      ansible.windows.win_service:
+        name: windows-agent-patch
+      register: agent_status
+
+    - name: Show agent status
+      ansible.builtin.debug:
+        msg:
+          - "Service: {{ agent_status.name }}"
+          - "State: {{ agent_status.state }}"
+          - "Start mode: {{ agent_status.start_mode }}"
