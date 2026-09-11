@@ -1,6 +1,6 @@
 ---
 - name: Deploy AuroSphere Windows Agent - Patch Enabled
-  hosts: DMDULB1FTR00030
+  hosts: DPDYPHGFDAY0536
   gather_facts: false
 
   vars:
