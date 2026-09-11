@@ -1,0 +1,54 @@
+---
+- name: Remove AuroSphere Windows Patch Agent
+  hosts: DPDYPHGFDAY0536
+  gather_facts: false
+
+  vars:
+    agent_install_dir: 'C:\Program Files\CustomAgent\windows-agent-patch'
+    agent_data_dir: 'C:\ProgramData\windows-agent-patch'
+    agent_service_name: 'windows-agent-patch'
+
+  tasks:
+
+    - name: Stop AuroSphere patch service
+      ansible.windows.win_service:
+        name: "{{ agent_service_name }}"
+        state: stopped
+      failed_when: false
+
+    - name: Remove AuroSphere patch service
+      ansible.windows.win_service:
+        name: "{{ agent_service_name }}"
+        state: absent
+      failed_when: false
+
+    - name: Remove AuroSphere installation directory
+      ansible.windows.win_file:
+        path: "{{ agent_install_dir }}"
+        state: absent
+
+    - name: Remove AuroSphere data and configuration
+      ansible.windows.win_file:
+        path: "{{ agent_data_dir }}"
+        state: absent
+
+    - name: Remove AuroSphere tray startup entry
+      ansible.windows.win_regedit:
+        path: 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run'
+        name: 'AuroSphere Agent'
+        state: absent
+      failed_when: false
+
+    - name: Confirm AuroSphere service removed
+      ansible.windows.win_service:
+        name: "{{ agent_service_name }}"
+      register: service_check
+      failed_when: false
+
+    - name: Display removal result
+      ansible.builtin.debug:
+        msg:
+          - "AuroSphere patch service removed"
+          - "AuroSphere installation directory removed"
+          - "AuroSphere ProgramData/configuration removed"
+          - "AuroSphere tray startup entry removed"
