@@ -1,19 +1,10 @@
 ---
-- name: Start AuroSphere Patch Agent
+- name: Stop AuroSphere Patch Agent
   hosts: DPDYPHGFDAY0536
   gather_facts: false
 
   tasks:
-    - name: Start AuroSphere patch agent service
+    - name: Stop patch agent
       ansible.windows.win_service:
         name: windows-agent-patch
-        state: started
-
-    - name: Check service status
-      ansible.windows.win_service:
-        name: windows-agent-patch
-      register: patch_agent_service
-
-    - name: Display service status
-      ansible.builtin.debug:
-        msg: "AuroSphere Patch Agent status: {{ patch_agent_service.state }}"
+        state: stopped
