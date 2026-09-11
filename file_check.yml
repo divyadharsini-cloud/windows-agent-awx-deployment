@@ -1,71 +1,79 @@
 ---
-- name: AuroSphere Patch Agent Diagnostic
+- name: AuroSphere Patch Diagnosis
   hosts: DPDYPHGFDAY0536
   gather_facts: false
 
   tasks:
 
-    - name: Check AuroSphere patch service
-      ansible.windows.win_service:
-        name: windows-agent-patch
-      register: patch_service
-
-    - name: Check patch agent process
-      ansible.windows.win_shell: |
-        Get-Process -Name "windows-agent-patch" -ErrorAction SilentlyContinue |
-          Select-Object Id, ProcessName, Path, StartTime |
-          Format-List
-      register: patch_process
-      changed_when: false
-
-    - name: Read latest patch agent log
+    - name: Show patch-related agent log lines
       ansible.windows.win_shell: |
         $log = "C:\ProgramData\windows-agent-patch\logs\agent.log"
 
         if (Test-Path $log) {
-            Get-Content $log -Tail 100
+            Get-Content $log -Tail 500 |
+              Select-String -Pattern "patch|KB5121003|metadata|evaluation|REQUIRED|INSTALL|download|400"
         }
         else {
-            Write-Output "LOG_NOT_FOUND: $log"
+            Write-Output "LOG_NOT_FOUND"
         }
       register: patch_log
       changed_when: false
 
-    - name: Check patch download directory
+    - name: Test PatchMaster approved API from endpoint
       ansible.windows.win_shell: |
-        $dir = "C:\ProgramData\windows-agent-patch\patch\downloads"
+        $url = "http://172.17.9.50:8443/api/v1/patches/approved?agent_id=DPDYPHGFDAY0536"
 
-        if (Test-Path $dir) {
-            Get-ChildItem $dir -Force |
-              Select-Object Name, Length, LastWriteTime |
-              Format-Table -AutoSize
+        try {
+            $response = Invoke-WebRequest `
+                -Uri $url `
+                -UseBasicParsing `
+                -TimeoutSec 30
+
+            Write-Output "HTTP_STATUS=$($response.StatusCode)"
+            Write-Output "RESPONSE=$($response.Content)"
+        }
+        catch {
+            Write-Output "PATCHMASTER_ERROR=$($_.Exception.Message)"
+        }
+      register: patchmaster
+      changed_when: false
+
+    - name: Show agent executable information
+      ansible.windows.win_shell: |
+        $exe = "C:\Program Files\CustomAgent\windows-agent-patch\windows-agent-patch.exe"
+
+        if (Test-Path $exe) {
+            $f = Get-Item $exe
+
+            Write-Output "EXE=$($f.FullName)"
+            Write-Output "SIZE=$($f.Length)"
+            Write-Output "LAST_WRITE=$($f.LastWriteTime)"
+            Write-Output "VERSION=$($f.VersionInfo.FileVersion)"
         }
         else {
-            Write-Output "DOWNLOAD_DIRECTORY_NOT_FOUND: $dir"
+            Write-Output "EXE_NOT_FOUND"
         }
-      register: downloads
+      register: exe_info
       changed_when: false
 
-    - name: Check PatchMaster connectivity
+    - name: Show current patch configuration
       ansible.windows.win_shell: |
-        Test-NetConnection 172.17.9.50 -Port 8443 |
-          Select-Object ComputerName, RemotePort, TcpTestSucceeded
-      register: patchmaster_connection
+        $cfg = "C:\ProgramData\windows-agent-patch\config.yaml"
+
+        if (Test-Path $cfg) {
+            Get-Content $cfg |
+              Select-String -Pattern "patch:|enabled:|interval_seconds:|master_url:|data_dir:|download_dir:|auto_install:|auto_reboot:"
+        }
+        else {
+            Write-Output "CONFIG_NOT_FOUND"
+        }
+      register: config
       changed_when: false
 
-    - name: Check API connectivity
-      ansible.windows.win_shell: |
-        Test-NetConnection 172.17.6.142 -Port 5000 |
-          Select-Object ComputerName, RemotePort, TcpTestSucceeded
-      register: api_connection
-      changed_when: false
-
-    - name: Show diagnostic result
+    - name: Display diagnosis
       ansible.builtin.debug:
         msg:
-          service: "{{ patch_service }}"
-          process: "{{ patch_process.stdout }}"
-          log: "{{ patch_log.stdout }}"
-          downloads: "{{ downloads.stdout }}"
-          patchmaster: "{{ patchmaster_connection.stdout }}"
-          api: "{{ api_connection.stdout }}"
+          PATCH_LOG: "{{ patch_log.stdout }}"
+          PATCHMASTER: "{{ patchmaster.stdout }}"
+          EXE: "{{ exe_info.stdout }}"
+          CONFIG: "{{ config.stdout }}"
