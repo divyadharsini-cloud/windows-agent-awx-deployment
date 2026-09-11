@@ -1,0 +1,9 @@
+- name: Stop AuroSphere Patch Agent
+  hosts: DPDYPHGFDAY0536
+  gather_facts: false
+
+  tasks:
+    - name: Stop patch agent
+      ansible.windows.win_service:
+        name: windows-agent-patch
+        state: stopped
