@@ -1,0 +1,30 @@
+---
+- name: Check AuroSphere patch download
+  hosts: DPDYPHGFDAY0536
+  gather_facts: false
+
+  tasks:
+    - name: Check patch download directory
+      ansible.windows.win_shell: |
+        $path = "C:\ProgramData\windows-agent-patch\patch\downloads"
+
+        if (Test-Path $path) {
+            Write-Output "DOWNLOAD_DIR_EXISTS"
+            Get-ChildItem $path -Force |
+                Select-Object Name, Length, LastWriteTime
+        }
+        else {
+            Write-Output "DOWNLOAD_DIR_NOT_FOUND"
+        }
+
+    - name: Check patch agent service
+      ansible.windows.win_service:
+        name: windows-agent-patch
+      register: agent_service
+
+    - name: Show service status
+      ansible.builtin.debug:
+        msg:
+          - "Service: {{ agent_service.name }}"
+          - "State: {{ agent_service.state }}"
+          - "Start mode: {{ agent_service.start_mode }}"
