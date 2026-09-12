@@ -1,79 +1,81 @@
 ---
-- name: AuroSphere Patch Diagnosis
+- name: Check AuroSphere Patch Download Status
   hosts: DPDYPHGFDAY0536
   gather_facts: false
 
+  vars:
+    patch_file: 'C:\ProgramData\windows-agent-patch\patch\downloads\KB5121003.bin.part'
+    agent_log: 'C:\ProgramData\windows-agent\logs\agent.log'
+
   tasks:
 
-    - name: Show patch-related agent log lines
-      ansible.windows.win_shell: |
-        $log = "C:\ProgramData\windows-agent-patch\logs\agent.log"
+    # --------------------------------------------------
+    # Check partial download file
+    # --------------------------------------------------
 
-        if (Test-Path $log) {
-            Get-Content $log -Tail 500 |
-              Select-String -Pattern "patch|KB5121003|metadata|evaluation|REQUIRED|INSTALL|download|400"
+    - name: Check KB5121003 partial download
+      ansible.windows.win_stat:
+        path: "{{ patch_file }}"
+      register: patch_download
+
+    - name: Display patch download status
+      debug:
+        msg:
+          - "=============================================="
+          - "AuroSphere Patch Download Status"
+          - "=============================================="
+          - "File exists      : {{ patch_download.stat.exists | default(false) }}"
+          - "Downloaded bytes : {{ patch_download.stat.size | default(0) }}"
+          - "Downloaded GB    : {{ ((patch_download.stat.size | default(0)) / 1073741824) | round(2) }}"
+          - "Last modified    : {{ patch_download.stat.last_write_time | default('N/A') }}"
+          - "Expected package : approximately 5.10 GB"
+          - "=============================================="
+
+    # --------------------------------------------------
+    # Check agent service
+    # --------------------------------------------------
+
+    - name: Check windows-agent service
+      ansible.windows.win_service:
+        name: windows-agent
+      register: agent_service
+
+    - name: Display agent service status
+      debug:
+        msg:
+          - "Windows Agent service : {{ agent_service.state }}"
+          - "Startup type          : {{ agent_service.start_mode }}"
+
+    # --------------------------------------------------
+    # Check relevant patch download logs
+    # --------------------------------------------------
+
+    - name: Check AuroSphere patch download logs
+      ansible.windows.win_shell: |
+        if (Test-Path "{{ agent_log }}") {
+            Get-Content "{{ agent_log }}" |
+            Select-String "patch partial file found|patch download starting|patch download resuming|patch download resume accepted|patch download interrupted|patch download transfer completed|patch download finalized"
         }
         else {
-            Write-Output "LOG_NOT_FOUND"
+            Write-Output "Agent log file not found"
         }
       register: patch_log
       changed_when: false
 
-    - name: Test PatchMaster approved API from endpoint
-      ansible.windows.win_shell: |
-        $url = "http://172.17.9.50:8443/api/v1/patches/approved?agent_id=DPDYPHGFDAY0536"
+    - name: Display patch download logs
+      debug:
+        var: patch_log.stdout_lines
 
-        try {
-            $response = Invoke-WebRequest `
-                -Uri $url `
-                -UseBasicParsing `
-                -TimeoutSec 30
+    # --------------------------------------------------
+    # Final result
+    # --------------------------------------------------
 
-            Write-Output "HTTP_STATUS=$($response.StatusCode)"
-            Write-Output "RESPONSE=$($response.Content)"
-        }
-        catch {
-            Write-Output "PATCHMASTER_ERROR=$($_.Exception.Message)"
-        }
-      register: patchmaster
-      changed_when: false
-
-    - name: Show agent executable information
-      ansible.windows.win_shell: |
-        $exe = "C:\Program Files\CustomAgent\windows-agent-patch\windows-agent-patch.exe"
-
-        if (Test-Path $exe) {
-            $f = Get-Item $exe
-
-            Write-Output "EXE=$($f.FullName)"
-            Write-Output "SIZE=$($f.Length)"
-            Write-Output "LAST_WRITE=$($f.LastWriteTime)"
-            Write-Output "VERSION=$($f.VersionInfo.FileVersion)"
-        }
-        else {
-            Write-Output "EXE_NOT_FOUND"
-        }
-      register: exe_info
-      changed_when: false
-
-    - name: Show current patch configuration
-      ansible.windows.win_shell: |
-        $cfg = "C:\ProgramData\windows-agent-patch\config.yaml"
-
-        if (Test-Path $cfg) {
-            Get-Content $cfg |
-              Select-String -Pattern "patch:|enabled:|interval_seconds:|master_url:|data_dir:|download_dir:|auto_install:|auto_reboot:"
-        }
-        else {
-            Write-Output "CONFIG_NOT_FOUND"
-        }
-      register: config
-      changed_when: false
-
-    - name: Display diagnosis
-      ansible.builtin.debug:
-        msg:
-          PATCH_LOG: "{{ patch_log.stdout }}"
-          PATCHMASTER: "{{ patchmaster.stdout }}"
-          EXE: "{{ exe_info.stdout }}"
-          CONFIG: "{{ config.stdout }}"
+    - name: Show final result
+      debug:
+        msg: >-
+          {% if patch_download.stat.exists | default(false) %}
+          KB5121003 partial download exists.
+          Current size: {{ ((patch_download.stat.size | default(0)) / 1073741824) | round(2) }} GB.
+          {% else %}
+          KB5121003 .part file does not currently exist.
+          {% endif %}
