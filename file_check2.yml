@@ -1,0 +1,43 @@
+---
+- name: Find Process Using AuroSphere Patch File
+  hosts: DPDYPHGFDAY0536
+  gather_facts: false
+
+  tasks:
+
+    - name: Check both AuroSphere services
+      ansible.windows.win_service_info:
+        name:
+          - windows-agent
+          - windows-agent-patch
+      register: services
+
+    - name: Display service states
+      debug:
+        msg: "{{ services.services | map(attribute='name') | zip(services.services | map(attribute='state')) | list }}"
+
+    - name: Check processes related to Windows Agent
+      ansible.windows.win_shell: |
+        Get-CimInstance Win32_Process |
+        Where-Object {
+          $_.Name -match 'windows-agent|custom-agent'
+        } |
+        Select-Object ProcessId, Name, ExecutablePath, CommandLine |
+        Format-List
+      register: agent_processes
+      changed_when: false
+
+    - name: Display agent processes
+      debug:
+        var: agent_processes.stdout_lines
+
+    - name: Check patch file information
+      ansible.windows.win_stat:
+        path: 'C:\ProgramData\windows-agent-patch\patch\downloads\KB5121003.bin.part'
+      register: patch_file
+
+    - name: Display patch file
+      debug:
+        msg:
+          - "File exists: {{ patch_file.stat.exists | default(false) }}"
+          - "Size: {{ patch_file.stat.size | default(0) }} bytes"
