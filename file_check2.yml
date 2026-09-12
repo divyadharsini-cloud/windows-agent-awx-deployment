@@ -1,92 +1,66 @@
 ---
-- name: Verify AuroSphere Patch Installation
+- name: Check AuroSphere Patch Installation
   hosts: DPDYPHGFDAY0536
   gather_facts: false
 
   tasks:
 
-    # --------------------------------------------------
-    # 1. Confirm downloaded package
-    # --------------------------------------------------
-
-    - name: Check downloaded KB5121003 package
-      ansible.windows.win_stat:
-        path: 'C:\ProgramData\windows-agent-patch\patch\downloads\KB5121003.bin'
-      register: patch_file
-
-    # --------------------------------------------------
-    # 2. Check Windows installed KB
-    # --------------------------------------------------
-
-    - name: Check KB5121003 installation
+    - name: Check patch agent service
       ansible.windows.win_shell: |
-        $patch = Get-HotFix -Id KB5121003 -ErrorAction SilentlyContinue
+        Get-Service windows-agent-patch |
+        Select-Object Name, Status, StartType
+      register: service
+      changed_when: false
 
-        if ($patch) {
-            Write-Output "STATUS: INSTALLED"
-            Write-Output "KB: $($patch.HotFixID)"
-            Write-Output "Installed On: $($patch.InstalledOn)"
-            Write-Output "Description: $($patch.Description)"
+    - name: Check KB5121003
+      ansible.windows.win_shell: |
+        $p = Get-HotFix -Id KB5121003 -ErrorAction SilentlyContinue
+
+        if ($p) {
+            "KB5121003 INSTALLED"
+            "InstalledOn: $($p.InstalledOn)"
         }
         else {
-            Write-Output "STATUS: NOT INSTALLED"
+            "KB5121003 NOT INSTALLED"
         }
-      register: hotfix
+      register: patch
       changed_when: false
 
-    # --------------------------------------------------
-    # 3. Check DISM package state
-    # --------------------------------------------------
-
-    - name: Check Windows component package
+    - name: Check patch history
       ansible.windows.win_shell: |
-        dism.exe /online /get-packages |
-        Select-String "KB5121003"
+        $file = "C:\ProgramData\windows-agent-patch\patch\history.json"
 
-        if ($LASTEXITCODE -ne 0) {
-            Write-Output "No DISM package information found for KB5121003"
-        }
-      register: dism_result
-      changed_when: false
-
-    # --------------------------------------------------
-    # 4. Check whether reboot is pending
-    # --------------------------------------------------
-
-    - name: Check pending reboot
-      ansible.windows.win_shell: |
-        $pending = $false
-
-        if (Test-Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending") {
-            $pending = $true
-        }
-
-        if (Test-Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired") {
-            $pending = $true
-        }
-
-        if ($pending) {
-            Write-Output "REBOOT STATUS: PENDING"
+        if (Test-Path $file) {
+            Get-Content $file
         }
         else {
-            Write-Output "REBOOT STATUS: NOT PENDING"
+            "history.json NOT FOUND"
         }
-      register: reboot
+      register: history
       changed_when: false
 
-    # --------------------------------------------------
-    # 5. Display final result
-    # --------------------------------------------------
+    - name: Check agent log
+      ansible.windows.win_shell: |
+        $log = "C:\ProgramData\windows-agent\logs\agent.log"
 
-    - name: Display patch verification result
+        if (Test-Path $log) {
+            Get-Content $log |
+            Select-String "KB5121003|install|wusa|error|failed"
+        }
+        else {
+            "agent.log NOT FOUND"
+        }
+      register: logs
+      changed_when: false
+
+    - name: Display result
       debug:
         msg:
-          - "=============================================="
-          - "AuroSphere Patch Verification"
-          - "=============================================="
-          - "Package exists : {{ patch_file.stat.exists | default(false) }}"
-          - "Package size   : {{ ((patch_file.stat.size | default(0)) / 1073741824) | round(2) }} GB"
-          - "Installation   : {{ hotfix.stdout_lines }}"
-          - "DISM status    : {{ dism_result.stdout_lines }}"
-          - "Reboot status  : {{ reboot.stdout_lines }}"
-          - "=============================================="
+          - "SERVICE:"
+          - "{{ service.stdout_lines }}"
+          - "PATCH:"
+          - "{{ patch.stdout_lines }}"
+          - "HISTORY:"
+          - "{{ history.stdout_lines }}"
+          - "LOG:"
+          - "{{ logs.stdout_lines }}"
