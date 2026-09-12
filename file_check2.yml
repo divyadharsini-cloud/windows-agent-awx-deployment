@@ -1,67 +1,30 @@
 ---
-- name: Diagnose AuroSphere Patch Download
+- name: Verify AuroSphere Patch Package
   hosts: DPDYPHGFDAY0536
   gather_facts: false
 
   tasks:
 
-    - name: Check AuroSphere services
+    - name: Calculate SHA256 of KB5121003
       ansible.windows.win_shell: |
-        Get-Service -Name "windows-agent","windows-agent-patch" -ErrorAction SilentlyContinue |
+        Get-FileHash `
+          "C:\ProgramData\windows-agent-patch\patch\downloads\KB5121003.bin" `
+          -Algorithm SHA256
+      register: patch_hash
+      changed_when: false
+
+    - name: Display SHA256
+      debug:
+        var: patch_hash.stdout_lines
+
+    - name: Check patch agent service
+      ansible.windows.win_shell: |
+        Get-Service -Name "windows-agent-patch" |
         Select-Object Name, Status, StartType |
         Format-Table -AutoSize
-      register: services
+      register: service_status
       changed_when: false
 
     - name: Display service status
       debug:
-        var: services.stdout_lines
-
-    - name: Check running AuroSphere processes
-      ansible.windows.win_shell: |
-        Get-CimInstance Win32_Process |
-        Where-Object {
-          $_.Name -match 'windows-agent|custom-agent'
-        } |
-        Select-Object ProcessId, Name, ExecutablePath, CommandLine |
-        Format-List
-      register: processes
-      changed_when: false
-
-    - name: Display running processes
-      debug:
-        var: processes.stdout_lines
-
-    - name: Check KB5121003 partial file
-      ansible.windows.win_shell: |
-        $file = "C:\ProgramData\windows-agent-patch\patch\downloads\KB5121003.bin.part"
-
-        if (Test-Path $file) {
-            $item = Get-Item $file
-
-            Write-Output "File exists : True"
-            Write-Output "Size bytes  : $($item.Length)"
-            Write-Output "Size GB     : $([math]::Round($item.Length / 1GB, 2))"
-            Write-Output "Modified    : $($item.LastWriteTime)"
-        }
-        else {
-            Write-Output "File exists : False"
-        }
-      register: patch_file
-      changed_when: false
-
-    - name: Display patch file status
-      debug:
-        var: patch_file.stdout_lines
-
-    - name: Check active connections to PatchMaster
-      ansible.windows.win_shell: |
-        Get-NetTCPConnection -RemoteAddress 172.17.9.50 -RemotePort 8443 -ErrorAction SilentlyContinue |
-        Select-Object LocalAddress, LocalPort, RemoteAddress, RemotePort, State, OwningProcess |
-        Format-Table -AutoSize
-      register: connections
-      changed_when: false
-
-    - name: Display PatchMaster connections
-      debug:
-        var: connections.stdout_lines
+        var: service_status.stdout_lines
